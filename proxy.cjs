@@ -26,9 +26,24 @@ const os = require('os');
 const crypto = require('crypto');
 const { URL } = require('url');
 
-const METER_DIR = path.join(os.homedir(), '.claude', 'token-meter');
+// CLAUDE_CONFIG_DIR relocates the whole ~/.claude tree (deliverable 5) --
+// honour it everywhere the config dir is assumed, same as Claude Code itself.
+const CONFIG_DIR = process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude');
+const METER_DIR = path.join(CONFIG_DIR, 'token-meter');
 const LIVE_FILE = process.env.TOKEN_METER_LIVE_FILE || path.join(METER_DIR, 'live.jsonl');
-const UPSTREAM = process.env.PROXY_UPSTREAM || 'https://api.anthropic.com';
+const CONFIG_FILE = path.join(METER_DIR, 'config.json');
+// Precedence: PROXY_UPSTREAM env > config.json's "upstream" (written by
+// `wire --proxy` when it finds a pre-existing custom ANTHROPIC_BASE_URL) >
+// the real Anthropic API.
+function readConfiguredUpstream() {
+  try {
+    const cfg = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'));
+    return (cfg && typeof cfg.upstream === 'string' && cfg.upstream) || null;
+  } catch (e) {
+    return null;
+  }
+}
+const UPSTREAM = process.env.PROXY_UPSTREAM || readConfiguredUpstream() || 'https://api.anthropic.com';
 const PORT = Number(process.env.PROXY_PORT || 4778);
 const W_OUT_CHARS_PER_TOKEN = 3.5; // outEst divisor for streamed delta characters
 
@@ -202,13 +217,51 @@ function nextReqId() {
   return Date.now().toString(36) + '-' + reqCounter;
 }
 
+// Warnings computed from a req-start's beta header + tool breakdown (deliverable 1).
+// See ROLLBACK.md / README.md for the real incident these two rules address.
+function computeWarnings(betaHeader, model, breakdown) {
+  const warnings = [];
+  const tools = (breakdown && breakdown.tools) || [];
+  const hasToolSearch = tools.some((t) => t.name === 'ToolSearch');
+  if (!hasToolSearch && (tools.length > 60 || (breakdown && breakdown.toolsTotal > 250_000))) {
+    warnings.push('tool-search-off');
+  }
+  // ponytail: "context-1m substring in anthropic-beta" is an unverified
+  // assumption (never confirmed against real 1M-window traffic) -- upgrade
+  // by capturing a real [1m]-model request and checking the beta string.
+  if (model && /sonnet-5|opus-5|fable/.test(model) && !betaHeader.includes('context-1m')) {
+    warnings.push('context-200k');
+  }
+  return warnings;
+}
+
+const WARNING_REMEDY = {
+  'tool-search-off': 'tool search is OFF (full tool schemas sent every call) -- set env ENABLE_TOOL_SEARCH=true',
+  'context-200k': 'this model is budgeted at 200K, not its 1M window -- start with a [1m] model, e.g. claude --model sonnet[1m]',
+};
+
 function startProxy({ port = PORT, upstream = UPSTREAM, liveFile = LIVE_FILE } = {}) {
   const writeRecord = makeWriter(liveFile);
   const upstreamUrl = new URL(upstream);
   const agent = upstreamUrl.protocol === 'https:' ? new https.Agent({ keepAlive: true }) : new http.Agent({ keepAlive: true });
   const client = upstreamUrl.protocol === 'https:' ? https : http;
+  // Once per sessionId per rule, not once per request. Scoped to this
+  // startProxy() call so each --selftest server instance starts fresh.
+  const warnedOnce = new Set();
+  function warnOnce(sessionId, rule) {
+    const key = (sessionId || '(no-session)') + ':' + rule;
+    if (warnedOnce.has(key)) return;
+    warnedOnce.add(key);
+    console.error(`token-meter proxy: ${WARNING_REMEDY[rule]}`);
+  }
 
   const server = http.createServer(async (req, res) => {
+    if (req.method === 'GET' && req.url === '/api/hello') {
+      // Local-only probe target for `wire --proxy` -- never forwarded upstream.
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end('{"ok":true}');
+      return;
+    }
     const reqId = nextReqId();
     const startTime = Date.now();
     let responseEnded = false;
@@ -244,20 +297,30 @@ function startProxy({ port = PORT, upstream = UPSTREAM, liveFile = LIVE_FILE } =
       }
     }
     const breakdown = buildBreakdown(parsedBody);
+    const sessionId = req.headers['x-claude-code-session-id'] || null;
+    const model = (parsedBody && parsedBody.model) || null;
+    // anthropic-beta can arrive as a repeated header (string[]) -- normalize
+    // to one comma-joined string before any substring test.
+    const betaHeader = [].concat(req.headers['anthropic-beta'] || []).join(',');
+    const beta = betaHeader || null;
+    const warnings = computeWarnings(betaHeader, model, breakdown);
+    for (const rule of warnings) warnOnce(sessionId, rule);
 
     writeRecord('req-start', {
       reqId,
       path: req.url,
-      sessionId: req.headers['x-claude-code-session-id'] || null,
+      sessionId,
       agentId: req.headers['x-claude-code-agent-id'] || null,
       parentAgentId: req.headers['x-claude-code-parent-agent-id'] || null,
-      model: (parsedBody && parsedBody.model) || null,
+      model,
       maxTokens: (parsedBody && parsedBody.max_tokens) || null,
       thinking: !!(parsedBody && parsedBody.thinking),
       effort: (parsedBody && parsedBody.output_config && parsedBody.output_config.effort) || null,
       stream: !!(parsedBody && parsedBody.stream),
       bodyBytes: bodyBuf.length,
       breakdown,
+      beta,
+      warnings,
     });
 
     const outboundHeaders = filterHeaders(req.headers);
@@ -455,10 +518,12 @@ function handleSSEData(dataStr, ctx, writeRecord) {
 // ---------------------------------------------------------------------------
 async function runSelftest() {
   const failures = [];
+  let total = 0;
   function assert(cond, msg) {
     if (!cond) throw new Error(msg);
   }
   async function test(name, fn) {
+    total++;
     try {
       await fn();
       console.log('ok   -', name);
@@ -820,10 +885,105 @@ async function runSelftest() {
     }
   }, 20000);
 
+  // ---- Check 10: tool-search-off rule + warn-once-per-session ----
+  await test('10. tool-search-off: 215 tools w/o ToolSearch warns (once per session); 16 tools w/ ToolSearch does not', async () => {
+    const fake = http.createServer((req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end('{}');
+    });
+    await new Promise((r) => fake.listen(0, '127.0.0.1', r));
+    const fakePort = fake.address().port;
+    const { port, close } = await startProxy({ port: 0, upstream: `http://127.0.0.1:${fakePort}`, liveFile });
+    const origErr = console.error;
+    const errLines = [];
+    console.error = (...a) => errLines.push(a.join(' '));
+    try {
+      function post(body, sessionId) {
+        return new Promise((resolve, reject) => {
+          const r = http.request(
+            { host: '127.0.0.1', port, path: '/v1/messages', method: 'POST', headers: { 'content-type': 'application/json', 'x-claude-code-session-id': sessionId } },
+            (res) => {
+              res.resume();
+              res.on('end', resolve);
+            }
+          );
+          r.on('error', reject);
+          r.end(body);
+        });
+      }
+      const manyTools = Array.from({ length: 215 }, (_, i) => ({ name: 'tool' + i, description: 'd' }));
+      const bodyMany = JSON.stringify({ model: 'claude-sonnet-5', tools: manyTools, messages: [] });
+      await post(bodyMany, 'sess-many');
+      await post(bodyMany, 'sess-many'); // same session -- must warn to stderr only once
+
+      const fewTools = Array.from({ length: 15 }, (_, i) => ({ name: 'tool' + i })).concat([{ name: 'ToolSearch' }]);
+      const bodyFew = JSON.stringify({ model: 'claude-sonnet-5', tools: fewTools, messages: [] });
+      await post(bodyFew, 'sess-few');
+
+      const lines = fs
+        .readFileSync(liveFile, 'utf8')
+        .trim()
+        .split('\n')
+        .map((l) => JSON.parse(l));
+      const startMany = lines.filter((l) => l.type === 'req-start' && l.sessionId === 'sess-many');
+      assert(startMany.length === 2 && startMany.every((l) => l.warnings.includes('tool-search-off')), 'expected tool-search-off on both sess-many requests');
+      const startFew = lines.find((l) => l.type === 'req-start' && l.sessionId === 'sess-few');
+      assert(!startFew.warnings.includes('tool-search-off'), 'expected no tool-search-off for 16 tools including ToolSearch');
+      const warnLines = errLines.filter((l) => l.includes('tool search is OFF'));
+      assert(warnLines.length === 1, `expected exactly 1 stderr warning for sess-many (warn-once), got ${warnLines.length}`);
+    } finally {
+      console.error = origErr;
+      await close();
+      await new Promise((r) => fake.close(r));
+    }
+  });
+
+  // ---- Check 11: context-200k rule (beta may repeat as string[]; normalized before the substring test) ----
+  await test('11. context-200k: fires for a 1M-eligible model without context-1m beta, not with it', async () => {
+    const fake = http.createServer((req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end('{}');
+    });
+    await new Promise((r) => fake.listen(0, '127.0.0.1', r));
+    const fakePort = fake.address().port;
+    const { port, close } = await startProxy({ port: 0, upstream: `http://127.0.0.1:${fakePort}`, liveFile });
+    try {
+      function post(body, headers) {
+        return new Promise((resolve, reject) => {
+          const r = http.request(
+            { host: '127.0.0.1', port, path: '/v1/messages', method: 'POST', headers: Object.assign({ 'content-type': 'application/json' }, headers) },
+            (res) => {
+              res.resume();
+              res.on('end', resolve);
+            }
+          );
+          r.on('error', reject);
+          r.end(body);
+        });
+      }
+      const body = JSON.stringify({ model: 'claude-sonnet-5', messages: [] });
+      await post(body, { 'x-claude-code-session-id': 'sess-200k' });
+      await post(body, { 'x-claude-code-session-id': 'sess-1m', 'anthropic-beta': 'context-1m-2025-08-07' });
+      const lines = fs
+        .readFileSync(liveFile, 'utf8')
+        .trim()
+        .split('\n')
+        .map((l) => JSON.parse(l));
+      const s200k = lines.find((l) => l.type === 'req-start' && l.sessionId === 'sess-200k');
+      const s1m = lines.find((l) => l.type === 'req-start' && l.sessionId === 'sess-1m');
+      assert(s200k.warnings.includes('context-200k'), 'expected context-200k without context-1m beta');
+      assert(!s1m.warnings.includes('context-200k'), 'expected no context-200k when beta includes context-1m');
+      assert(s1m.beta === 'context-1m-2025-08-07', 'expected beta header captured on the record');
+    } finally {
+      await close();
+      await new Promise((r) => fake.close(r));
+    }
+  });
+
   fs.rmSync(tmpDir, { recursive: true, force: true });
 
   console.log('');
-  console.log(failures.length === 0 ? 'ALL 9 PROXY SELFTESTS PASSED' : `${failures.length} PROXY SELFTEST(S) FAILED: ${failures.join('; ')}`);
+  console.log(failures.length === 0 ? `ALL ${total} PROXY SELFTESTS PASSED` : `${failures.length} PROXY SELFTEST(S) FAILED: ${failures.join('; ')}`);
   process.exit(failures.length === 0 ? 0 : 1);
 }
 
