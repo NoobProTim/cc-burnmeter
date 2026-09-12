@@ -17,8 +17,11 @@ const readline = require('readline');
 const { EventEmitter } = require('events');
 
 const HOME = os.homedir();
-const PROJECTS_DIR = process.env.TOKEN_METER_PROJECTS_DIR || path.join(HOME, '.claude', 'projects');
-const METER_DIR = path.join(HOME, '.claude', 'token-meter');
+// CLAUDE_CONFIG_DIR relocates the whole ~/.claude tree -- honour it the same
+// way Claude Code itself does, and the same way proxy.cjs does (deliverable 5).
+const CONFIG_DIR = process.env.CLAUDE_CONFIG_DIR || path.join(HOME, '.claude');
+const PROJECTS_DIR = process.env.TOKEN_METER_PROJECTS_DIR || path.join(CONFIG_DIR, 'projects');
+const METER_DIR = path.join(CONFIG_DIR, 'token-meter');
 const LIVE_FILE = process.env.TOKEN_METER_LIVE_FILE || path.join(METER_DIR, 'live.jsonl');
 // Tier 2 (SPEC.md §9): proxy.cjs's live.jsonl gives EXACT per-request detail
 // a transcript only reveals after the fact. Populated by processLiveLine();
@@ -76,7 +79,12 @@ function priceFor(model, speed) {
 // Small helpers
 // ---------------------------------------------------------------------------
 function stripSlugPrefix(slug) {
-  const stripped = slug.replace(/^-Users-tj-/, '');
+  // Claude Code slugifies a project's absolute cwd by replacing path
+  // separators with '-' (e.g. /Users/tj/foo -> -Users-tj-foo, and the same
+  // on Windows with backslashes). Derive the home prefix from the real
+  // homedir (not CONFIG_DIR, which may be relocated) instead of a literal.
+  const homePrefix = os.homedir().replace(/[\\/]/g, '-') + '-';
+  const stripped = slug.startsWith(homePrefix) ? slug.slice(homePrefix.length) : slug;
   return stripped || slug;
 }
 
@@ -1098,7 +1106,9 @@ function assert(cond, msg) {
 
 function runSelftest() {
   let failures = 0;
+  let total = 0;
   function test(name, fn) {
+    total++;
     try {
       fn();
       console.log('ok   -', name);
@@ -1253,7 +1263,35 @@ function runSelftest() {
     assert(calls[0].cw5m === 1833, `expected cw5m recovered as 6903-5070=1833, got ${calls[0].cw5m}`);
   });
 
-  console.log(failures === 0 ? `ALL ${10} SELFTESTS PASSED` : `${failures} SELFTEST(S) FAILED`);
+  // 11. stripSlugPrefix strips the REAL homedir prefix (deliverable 5), not a
+  // literal -Users-tj-; a slug from an unrelated machine/homedir is untouched.
+  test('stripSlugPrefix derives its prefix from os.homedir(), not a literal', () => {
+    const homeSlug = os.homedir().replace(/[\\/]/g, '-');
+    assert(stripSlugPrefix(homeSlug + '-myproject') === 'myproject', 'expected homedir prefix stripped');
+    assert(stripSlugPrefix('-some-other-machine-project') === '-some-other-machine-project', 'expected non-matching slug left alone');
+  });
+
+  // 12. CLAUDE_CONFIG_DIR relocates METER_DIR/LIVE_FILE/PROJECTS_DIR (checked
+  // in a fresh subprocess since these are computed once at module load).
+  test('CLAUDE_CONFIG_DIR relocates the meter/config paths', () => {
+    const { execFileSync } = require('child_process');
+    const tmp = fs.mkdtempSync(require('os').tmpdir() + '/token-meter-selftest-config-');
+    try {
+      const out = execFileSync(
+        process.execPath,
+        ['-e', "const m = require(process.argv[1]); console.log(JSON.stringify({c: m.CONFIG_DIR, m: m.METER_DIR, l: m.LIVE_FILE}))", require.resolve('./meter.cjs')],
+        { env: Object.assign({}, process.env, { CLAUDE_CONFIG_DIR: tmp, TOKEN_METER_LIVE_FILE: '', TOKEN_METER_PROJECTS_DIR: '' }) }
+      ).toString('utf8');
+      const got = JSON.parse(out);
+      assert(got.c === tmp, `expected CONFIG_DIR=${tmp}, got ${got.c}`);
+      assert(got.m === path.join(tmp, 'token-meter'), `expected METER_DIR under ${tmp}, got ${got.m}`);
+      assert(got.l === path.join(tmp, 'token-meter', 'live.jsonl'), `expected LIVE_FILE under ${tmp}, got ${got.l}`);
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  console.log(failures === 0 ? `ALL ${total} SELFTESTS PASSED` : `${failures} SELFTEST(S) FAILED`);
   process.exit(failures === 0 ? 0 : 1);
 }
 
@@ -1291,4 +1329,4 @@ function main() {
 
 if (require.main === module) main();
 
-module.exports = { priceFor, processLine, makeCtx, feedChunk, makeTailBuffer, discoverFiles, sumCalls };
+module.exports = { priceFor, processLine, makeCtx, feedChunk, makeTailBuffer, discoverFiles, sumCalls, stripSlugPrefix, CONFIG_DIR, METER_DIR, LIVE_FILE, PROJECTS_DIR };

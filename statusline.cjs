@@ -17,7 +17,12 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 
-const CACHE_FILE = process.env.TOKEN_METER_STATUSLINE_CACHE || path.join(os.homedir(), '.claude', 'token-meter', '.statusline-cache.json');
+// CLAUDE_CONFIG_DIR relocates the whole ~/.claude tree -- honour it the same
+// way meter.cjs/proxy.cjs do (deliverable 5).
+const CONFIG_DIR = process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude');
+const METER_DIR = path.join(CONFIG_DIR, 'token-meter');
+const CACHE_FILE = process.env.TOKEN_METER_STATUSLINE_CACHE || path.join(METER_DIR, '.statusline-cache.json');
+const LIVE_FILE = process.env.TOKEN_METER_LIVE_FILE || path.join(METER_DIR, 'live.jsonl');
 
 function fmtK(n) {
   if (n == null) return '?';
