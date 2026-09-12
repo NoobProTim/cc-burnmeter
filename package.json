@@ -12,18 +12,20 @@
     "node": ">=18"
   },
   "bin": {
-    "cc-burnmeter": "meter.cjs"
+    "cc-burnmeter": "cli.cjs"
   },
   "scripts": {
-    "test": "node meter.cjs --selftest && node proxy.cjs --selftest",
+    "test": "node cli.cjs selftest",
     "serve": "node meter.cjs --serve 4777",
     "proxy": "node proxy.cjs"
   },
   "files": [
+    "cli.cjs",
     "meter.cjs",
     "meter.html",
     "proxy.cjs",
     "statusline.cjs",
+    "wire.cjs",
     "README.md",
     "LICENSE"
   ],
