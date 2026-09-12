@@ -13,6 +13,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const http = require('http');
+const crypto = require('crypto');
 const readline = require('readline');
 const { EventEmitter } = require('events');
 
@@ -311,7 +312,7 @@ function processLine(line, ctx, emit) {
     ctx.currentTurn = {
       turnId: record.uuid || ctx.sessionId + ':' + record.timestamp,
       ts: record.timestamp,
-      promptPreview: text.slice(0, 140).replace(/\s+/g, ' '),
+      promptPreview: SHOW_PROMPTS ? text.slice(0, 140).replace(/\s+/g, ' ') : null,
       promptChars: text.length,
       source: record.promptSource || (record.message && record.message.promptSource) || null,
       calls: [],
@@ -448,6 +449,11 @@ function discoverFiles({ hours = 24, file = null } = {}) {
 // ---------------------------------------------------------------------------
 const bus = new EventEmitter();
 bus.setMaxListeners(100);
+
+// Privacy default (deliverable 4): prompt text never leaves the machine
+// unless explicitly opted in with --show-prompts. promptChars (a length) is
+// harmless and always kept; only the text preview is gated.
+let SHOW_PROMPTS = false;
 
 const state = {
   sessionsMap: new Map(), // key -> {key, sessionId, agentId, project, agentLabel, model, calls:[], turns:[]}
@@ -618,6 +624,7 @@ function sessionSummary(s) {
     lastHour,
     lastActive: last ? last.ts : null,
     inFlightSince: inFlightSince(s),
+    warnings: s.lastWarnings || [],
   };
 }
 
@@ -660,6 +667,8 @@ function processLiveLine(line, liveEmit) {
       stream: rec.stream,
       bodyBytes: rec.bodyBytes,
       breakdown: rec.breakdown,
+      beta: rec.beta || null,
+      warnings: rec.warnings || [],
       status: 'pending',
       msgId: null,
       input: null,
@@ -720,6 +729,7 @@ function attachLiveToSession(lc) {
   if (s.liveCalls.size > 30) {
     s.liveCalls.delete(s.liveCalls.keys().next().value);
   }
+  s.lastWarnings = lc.warnings || []; // latest request's warnings win, including "none"
 }
 
 async function startLiveTailer() {
@@ -793,6 +803,36 @@ async function startLiveTailer() {
 let entries = []; // active discovered file entries with ctx/offset attached
 const liveCalls = new Map(); // reqId -> live call snapshot (Tier 2, see above)
 
+// parseFileFull opens a readline stream per file; an account with hundreds
+// of sessions firing them all via Promise.all at once can exhaust file
+// descriptors. Cap concurrency with a tiny semaphore.
+const PARSE_CONCURRENCY = 32;
+async function mapLimit(items, limit, fn) {
+  if (items.length === 0) return [];
+  const results = new Array(items.length);
+  let idx = 0;
+  let inFlight = 0;
+  let done = 0;
+  return new Promise((resolve, reject) => {
+    function pump() {
+      while (inFlight < limit && idx < items.length) {
+        const i = idx++;
+        inFlight++;
+        Promise.resolve(fn(items[i], i))
+          .then((r) => {
+            results[i] = r;
+            inFlight--;
+            done++;
+            if (done === items.length) resolve(results);
+            else pump();
+          })
+          .catch(reject);
+      }
+    }
+    pump();
+  });
+}
+
 async function startTailer(hoursOpt) {
   entries = discoverFiles({ hours: hoursOpt });
   // Parse live.jsonl BEFORE transcripts: it's the earlier-arriving side of
@@ -802,7 +842,7 @@ async function startTailer(hoursOpt) {
   // startup. The reverse (callsByMsgId) join in buildCall/processLiveLine
   // covers the rest regardless of ordering.
   await startLiveTailer();
-  await Promise.all(entries.map(parseFileFull));
+  await mapLimit(entries, PARSE_CONCURRENCY, parseFileFull);
 
   function pollGrowth() {
     for (const e of entries) readGrowth(e);
@@ -856,7 +896,11 @@ async function startTailer(hoursOpt) {
       pollGrowth();
     });
   } catch (e) {
-    // recursive watch unsupported on this platform; poll fallback covers it
+    // Linux (and some other platforms) reject fs.watch's { recursive: true }.
+    // pollGrowth's 3s setInterval above still covers new-file growth; only
+    // brand-new session files lose the instant-registration fast path. Say
+    // so once rather than degrading silently.
+    console.error('token-meter: recursive file watch unsupported here -- falling back to polling mode (3s)');
   }
 }
 
@@ -983,12 +1027,51 @@ function runTerminalView(hours) {
 // ---------------------------------------------------------------------------
 // Dashboard server
 // ---------------------------------------------------------------------------
+// Random per-machine bearer token (deliverable 4), gating /api/* and /events
+// so a page on another origin/device on the LAN can't read call/session data.
+// Mode 0600; regenerated only if the file is missing.
+function getOrCreateToken() {
+  const tokenFile = path.join(METER_DIR, 'token');
+  try {
+    return fs.readFileSync(tokenFile, 'utf8').trim();
+  } catch (e) {
+    const token = crypto.randomBytes(24).toString('hex');
+    fs.mkdirSync(METER_DIR, { recursive: true });
+    fs.writeFileSync(tokenFile, token, { mode: 0o600 });
+    return token;
+  }
+}
+
+function isLocalHost(hostHeader) {
+  if (!hostHeader) return false;
+  const host = hostHeader.split(':')[0];
+  return host === '127.0.0.1' || host === 'localhost' || host === '::1' || host === '[::1]';
+}
+
+// EventSource can't set an Authorization header, so ?token= is accepted too.
+function checkAuth(req, url, token) {
+  return req.headers['authorization'] === `Bearer ${token}` || url.searchParams.get('token') === token;
+}
+
 function startServer(port, hours) {
   startTailer(hours);
   const htmlPath = path.join(__dirname, 'meter.html');
+  const token = getOrCreateToken();
 
   const server = http.createServer((req, res) => {
     const url = new URL(req.url, 'http://127.0.0.1');
+    // DNS-rebinding guard: refuse any request whose Host header doesn't
+    // name this machine, regardless of auth.
+    if (!isLocalHost(req.headers.host)) {
+      res.writeHead(403, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'forbidden host' }));
+      return;
+    }
+    if ((url.pathname.startsWith('/api/') || url.pathname === '/events') && !checkAuth(req, url, token)) {
+      res.writeHead(401, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'unauthorized' }));
+      return;
+    }
     if (url.pathname === '/' || url.pathname === '/index.html') {
       fs.readFile(htmlPath, (err, data) => {
         if (err) {
@@ -1055,7 +1138,7 @@ function startServer(port, hours) {
     process.exit(1);
   });
   server.listen(port, '127.0.0.1', () => {
-    console.error(`token-meter dashboard: http://127.0.0.1:${port}`);
+    console.error(`token-meter dashboard: http://127.0.0.1:${server.address().port}/?token=${token}`);
   });
   return server;
 }
@@ -1104,13 +1187,23 @@ function assert(cond, msg) {
   if (!cond) throw new Error('ASSERTION FAILED: ' + msg);
 }
 
-function runSelftest() {
+async function runSelftest() {
   let failures = 0;
   let total = 0;
   function test(name, fn) {
     total++;
     try {
       fn();
+      console.log('ok   -', name);
+    } catch (e) {
+      failures++;
+      console.log('FAIL -', name, '--', e.message);
+    }
+  }
+  async function testAsync(name, fn) {
+    total++;
+    try {
+      await fn();
       console.log('ok   -', name);
     } catch (e) {
       failures++;
@@ -1291,8 +1384,105 @@ function runSelftest() {
     }
   });
 
+  // 13. mapLimit never runs more than `limit` callbacks concurrently.
+  await testAsync('mapLimit caps concurrency at 32 in-flight', async () => {
+    let active = 0;
+    let maxActive = 0;
+    const items = Array.from({ length: 100 }, (_, i) => i);
+    await mapLimit(items, PARSE_CONCURRENCY, async (i) => {
+      active++;
+      maxActive = Math.max(maxActive, active);
+      await new Promise((r) => setTimeout(r, 1));
+      active--;
+      return i * 2;
+    });
+    assert(maxActive <= PARSE_CONCURRENCY, `expected max concurrency <= ${PARSE_CONCURRENCY}, got ${maxActive}`);
+    assert(maxActive > 1, 'expected some real concurrency, not serial execution');
+  });
+
+  // 14. promptPreview is redacted (null) unless SHOW_PROMPTS is opted in.
+  test('promptPreview null by default; populated with SHOW_PROMPTS=true', () => {
+    const entry = { project: 'p', sessionId: 's-privacy', agentId: null, agentLabel: null };
+    const turnLine = JSON.stringify({ type: 'user', isMeta: false, uuid: 't-priv', timestamp: 't', message: { role: 'user', content: 'super secret prompt text' } });
+    const nextLine = JSON.stringify({ type: 'user', isMeta: false, uuid: 't-priv2', timestamp: 't2', message: { role: 'user', content: 'x' } });
+    const turns1 = [];
+    {
+      const ctx = makeCtx(entry);
+      processLine(turnLine, ctx, (k, p) => k === 'turn' && turns1.push(p));
+      processLine(nextLine, ctx, (k, p) => k === 'turn' && turns1.push(p)); // flush prior turn
+      assert(turns1[0].promptPreview === null, 'expected promptPreview null by default');
+    }
+    SHOW_PROMPTS = true;
+    try {
+      const turns2 = [];
+      const ctx2 = makeCtx(entry);
+      processLine(turnLine, ctx2, (k, p) => k === 'turn' && turns2.push(p));
+      processLine(nextLine, ctx2, (k, p) => k === 'turn' && turns2.push(p));
+      assert(turns2[0].promptPreview === 'super secret prompt text', `expected preview populated, got ${JSON.stringify(turns2[0] && turns2[0].promptPreview)}`);
+    } finally {
+      SHOW_PROMPTS = false;
+    }
+  });
+
+  // 15/16. Auth + Host-check (deliverable 4): a real dashboard subprocess,
+  // config-dir relocated to a temp dir so getOrCreateToken() never touches
+  // the real ~/.claude/token-meter/token file.
+  await testAsync('unauthenticated /api/state request -> 401', async () => {
+    const { server, port } = await spawnTestServer();
+    try {
+      const res = await httpGet(port, '/api/state', {});
+      assert(res.status === 401, `expected 401, got ${res.status}`);
+    } finally {
+      server.kill();
+    }
+  });
+  await testAsync('spoofed Host header -> 403 even with a valid token', async () => {
+    const { server, port, token } = await spawnTestServer();
+    try {
+      const res = await httpGet(port, `/api/state?token=${token}`, { Host: 'evil.example.com' });
+      assert(res.status === 403, `expected 403, got ${res.status}`);
+    } finally {
+      server.kill();
+    }
+  });
+
   console.log(failures === 0 ? `ALL ${total} SELFTESTS PASSED` : `${failures} SELFTEST(S) FAILED`);
   process.exit(failures === 0 ? 0 : 1);
+}
+
+// Spawns `meter.cjs --serve 0` in a subprocess with CLAUDE_CONFIG_DIR pointed
+// at a fresh temp dir (never the real ~/.claude), and resolves once its
+// startup banner reveals the OS-assigned port + generated token.
+function spawnTestServer() {
+  const { spawn } = require('child_process');
+  const tmp = fs.mkdtempSync(require('os').tmpdir() + '/token-meter-selftest-auth-');
+  const child = spawn(process.execPath, [require.resolve('./meter.cjs'), '--serve', '0'], {
+    env: Object.assign({}, process.env, { CLAUDE_CONFIG_DIR: tmp, TOKEN_METER_LIVE_FILE: '', TOKEN_METER_PROJECTS_DIR: path.join(tmp, 'projects') }),
+    stdio: ['ignore', 'ignore', 'pipe'],
+  });
+  child.once('exit', () => fs.rmSync(tmp, { recursive: true, force: true }));
+  return new Promise((resolve, reject) => {
+    let buf = '';
+    const timer = setTimeout(() => reject(new Error('timed out waiting for dashboard startup banner')), 5000);
+    child.stderr.on('data', (chunk) => {
+      buf += chunk;
+      const m = /:(\d+)\/\?token=([0-9a-f]+)/.exec(buf);
+      if (m) {
+        clearTimeout(timer);
+        resolve({ server: child, port: Number(m[1]), token: m[2] });
+      }
+    });
+  });
+}
+
+function httpGet(port, urlPath, headers) {
+  return new Promise((resolve, reject) => {
+    const req = http.get({ host: '127.0.0.1', port, path: urlPath, headers }, (res) => {
+      res.resume();
+      resolve({ status: res.statusCode });
+    });
+    req.on('error', reject);
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -1308,6 +1498,7 @@ function opt(args, name, def) {
 
 function main() {
   const args = process.argv.slice(2);
+  if (args.includes('--show-prompts')) SHOW_PROMPTS = true;
   if (args.includes('--selftest')) return runSelftest();
   if (args.includes('--json')) {
     const since = opt(args, '--since', '2h');
@@ -1329,4 +1520,4 @@ function main() {
 
 if (require.main === module) main();
 
-module.exports = { priceFor, processLine, makeCtx, feedChunk, makeTailBuffer, discoverFiles, sumCalls, stripSlugPrefix, CONFIG_DIR, METER_DIR, LIVE_FILE, PROJECTS_DIR };
+module.exports = { priceFor, processLine, makeCtx, feedChunk, makeTailBuffer, discoverFiles, sumCalls, stripSlugPrefix, CONFIG_DIR, METER_DIR, LIVE_FILE, PROJECTS_DIR, mapLimit };
