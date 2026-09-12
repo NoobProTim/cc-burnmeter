@@ -165,12 +165,124 @@ function lastCallSegment(transcriptPath) {
   }
 }
 
+const WARNING_TEXT = {
+  'tool-search-off': ' ⚠ tool search OFF',
+  'context-200k': ' ⚠ 200K window',
+};
+
+// Mirrors lastCallSegment's 256KB-tail-scan pattern, but over proxy.cjs's
+// live.jsonl instead of the transcript: finds the LAST req-start record for
+// this session and surfaces its warnings, if any. Absent/missing file (no
+// proxy wired) -> silently ''.
+function warningSuffix(sessionId) {
+  try {
+    if (!sessionId || !fs.existsSync(LIVE_FILE)) return '';
+    const st = fs.statSync(LIVE_FILE);
+    const start = Math.max(0, st.size - 256 * 1024);
+    const len = st.size - start;
+    if (len <= 0) return '';
+    const buf = Buffer.alloc(len);
+    const fd = fs.openSync(LIVE_FILE, 'r');
+    fs.readSync(fd, buf, 0, len, start);
+    fs.closeSync(fd);
+    const lines = buf.toString('utf8').split('\n').filter(Boolean);
+    for (let i = lines.length - 1; i >= 0; i--) {
+      let rec;
+      try {
+        rec = JSON.parse(lines[i]);
+      } catch (e) {
+        continue;
+      }
+      if (rec.type !== 'req-start' || rec.sessionId !== sessionId) continue;
+      return (rec.warnings || []).map((w) => WARNING_TEXT[w] || '').join('');
+    }
+    return '';
+  } catch (e) {
+    return '';
+  }
+}
+
 function fallback() {
   process.stdout.write('token-meter: n/a\n');
   process.exit(0);
 }
 
+function assert(cond, msg) {
+  if (!cond) throw new Error('ASSERTION FAILED: ' + msg);
+}
+
+// Fixture-based selftest for the live.jsonl warning suffix (deliverable 2):
+// spawns this same script as a real subprocess per case (env-controlled
+// TOKEN_METER_LIVE_FILE) so it exercises the actual stdin->stdout path,
+// including the <100ms budget the real Claude Code harness enforces.
+function runSelftest() {
+  const { execFileSync } = require('child_process');
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'token-meter-statusline-selftest-'));
+  let failures = 0;
+  function test(name, fn) {
+    try {
+      fn();
+      console.log('ok   -', name);
+    } catch (e) {
+      failures++;
+      console.log('FAIL -', name, '--', e.message);
+    }
+  }
+  const liveFile = path.join(tmp, 'live.jsonl');
+  const transcriptFile = path.join(tmp, 'transcript.jsonl');
+  fs.writeFileSync(transcriptFile, '');
+  function run(sessionId) {
+    const stdin = JSON.stringify({ model: { display_name: 'Test' }, session_id: sessionId, transcript_path: transcriptFile, context_window: {} });
+    return execFileSync(process.execPath, [__filename], {
+      input: stdin,
+      env: Object.assign({}, process.env, { TOKEN_METER_LIVE_FILE: liveFile, TOKEN_METER_STATUSLINE_CACHE: path.join(tmp, 'cache.json') }),
+    }).toString('utf8');
+  }
+
+  test('no live.jsonl -> silent, no warning suffix', () => {
+    const out = run('sess-none');
+    assert(!out.includes('⚠'), `expected no warning, got: ${out}`);
+  });
+
+  fs.writeFileSync(
+    liveFile,
+    [
+      JSON.stringify({ type: 'req-start', sessionId: 'sess-a', warnings: ['tool-search-off'] }),
+      JSON.stringify({ type: 'req-start', sessionId: 'sess-b', warnings: ['context-200k'] }),
+      JSON.stringify({ type: 'req-start', sessionId: 'sess-c', warnings: [] }),
+    ].join('\n') + '\n'
+  );
+
+  test('tool-search-off warning surfaced from live.jsonl', () => {
+    const out = run('sess-a');
+    assert(out.includes('⚠ tool search OFF'), `expected tool-search-off suffix, got: ${out}`);
+  });
+  test('context-200k warning surfaced from live.jsonl', () => {
+    const out = run('sess-b');
+    assert(out.includes('⚠ 200K window'), `expected context-200k suffix, got: ${out}`);
+  });
+  test('clean session (empty warnings array) prints no suffix', () => {
+    const out = run('sess-c');
+    assert(!out.includes('⚠'), `expected no warning, got: ${out}`);
+  });
+  test('unmatched session id prints no suffix', () => {
+    const out = run('sess-unknown');
+    assert(!out.includes('⚠'), `expected no warning for unknown session, got: ${out}`);
+  });
+  test('a full invocation stays under 100ms', () => {
+    const start = Date.now();
+    run('sess-a');
+    const elapsed = Date.now() - start;
+    assert(elapsed < 100, `expected < 100ms, got ${elapsed}ms`);
+  });
+
+  fs.rmSync(tmp, { recursive: true, force: true });
+  console.log(failures === 0 ? 'ALL 6 STATUSLINE SELFTESTS PASSED' : `${failures} STATUSLINE SELFTEST(S) FAILED`);
+  process.exit(failures === 0 ? 0 : 1);
+}
+
 function main() {
+  if (process.argv.includes('--selftest')) return runSelftest();
   let raw;
   try {
     raw = fs.readFileSync(0, 'utf8');
@@ -198,7 +310,9 @@ function main() {
       if (totals) parts.push(`session: ${fmtK(totals.sumIn)} in · ${fmtK(totals.sumOut)} out`);
     }
 
-    process.stdout.write(parts.join(' │ ') + '\n');
+    const warn = warningSuffix(data.session_id);
+
+    process.stdout.write(parts.join(' │ ') + warn + '\n');
     process.exit(0);
   } catch (e) {
     return fallback();
