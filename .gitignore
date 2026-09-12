@@ -1,0 +1,9 @@
+# runtime state — never commit (per-request usage records, caches, logs)
+live.jsonl
+live.*.jsonl
+*.log
+.statusline-cache.json
+# screenshots of the author's real sessions; regenerate from fixtures before any public release
+shots/
+node_modules/
+.DS_Store

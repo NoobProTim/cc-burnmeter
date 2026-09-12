@@ -1,0 +1,661 @@
+<title>Token Meter</title>
+<style>
+  :root {
+    color-scheme: light;
+    --surface-0: #fcfcfb;
+    --surface-1: #f4f3f0;
+    --surface-2: #eceae5;
+    --border: #ddd9d0;
+    --text-primary: #0b0b0b;
+    --text-secondary: #52514e;
+    --text-muted: #8a8880;
+    --accent: #2a78d6;
+    --good: #0ca30c;
+    --warning: #fab219;
+    --critical: #d03b3b;
+    --s1: #2a78d6; /* cache read */
+    --s2: #eb6834; /* 1h write */
+    --s3: #1baf7a; /* 5m write */
+    --s4: #eda100; /* uncached input */
+    --s5: #e87ba4; /* thinking */
+    --s6: #4a3aa7; /* visible output */
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      color-scheme: dark;
+      --surface-0: #14140f;
+      --surface-1: #1a1a19;
+      --surface-2: #232320;
+      --border: #34332e;
+      --text-primary: #ffffff;
+      --text-secondary: #c3c2b7;
+      --text-muted: #8d8c83;
+      --accent: #3987e5;
+      --good: #0ca30c;
+      --warning: #fab219;
+      --critical: #e66767;
+      --s1: #3987e5;
+      --s2: #d95926;
+      --s3: #199e70;
+      --s4: #c98500;
+      --s5: #d55181;
+      --s6: #9085e9;
+    }
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --surface-0: #14140f;
+    --surface-1: #1a1a19;
+    --surface-2: #232320;
+    --border: #34332e;
+    --text-primary: #ffffff;
+    --text-secondary: #c3c2b7;
+    --text-muted: #8d8c83;
+    --accent: #3987e5;
+    --good: #0ca30c;
+    --warning: #fab219;
+    --critical: #e66767;
+    --s1: #3987e5;
+    --s2: #d95926;
+    --s3: #199e70;
+    --s4: #c98500;
+    --s5: #d55181;
+    --s6: #9085e9;
+  }
+  * { box-sizing: border-box; }
+  body {
+    background: var(--surface-0);
+    color: var(--text-primary);
+    font: 13px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    padding: 16px;
+    padding-block: 16px;
+  }
+  h1 { font-size: 15px; margin: 0 0 12px; font-weight: 600; }
+  h2 { font-size: 13px; margin: 0 0 8px; font-weight: 600; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.03em; }
+  a { color: var(--accent); }
+  .row { display: flex; flex-wrap: wrap; gap: 12px; align-items: stretch; }
+  .card {
+    background: var(--surface-1);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px 14px;
+  }
+  .tile { min-width: 160px; flex: 1 1 160px; }
+  .tile .label { color: var(--text-secondary); font-size: 11px; text-transform: uppercase; letter-spacing: 0.03em; }
+  .tile .value { font-size: 20px; font-weight: 600; margin-top: 2px; }
+  .tile .sub { color: var(--text-muted); font-size: 11px; margin-top: 2px; }
+  section { margin-top: 18px; }
+  table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  th, td { text-align: left; padding: 5px 8px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+  th { color: var(--text-secondary); font-weight: 600; cursor: pointer; user-select: none; position: sticky; top: 0; background: var(--surface-1); }
+  th.sorted::after { content: ' \25BE'; }
+  tr.session-row { cursor: pointer; }
+  tr.session-row:hover { background: var(--surface-2); }
+  tr.session-row.inflight { background: color-mix(in srgb, var(--warning) 12%, transparent); }
+  .feed-wrap { max-height: 260px; overflow-y: auto; }
+  .feed-row { display: grid; grid-template-columns: 70px 1fr 90px 70px 70px 90px; gap: 8px; padding: 4px 8px; border-bottom: 1px solid var(--border); font-size: 11.5px; }
+  .feed-row.new { animation: flash 900ms ease-out; }
+  .feed-row.inflight-banner { grid-template-columns: 1fr; color: var(--warning); font-weight: 600; background: color-mix(in srgb, var(--warning) 10%, transparent); }
+  @keyframes flash { from { background: color-mix(in srgb, var(--accent) 25%, transparent); } to { background: transparent; } }
+  .muted { color: var(--text-muted); }
+  .mono { font-variant-numeric: tabular-nums; }
+  .pill { display: inline-block; padding: 1px 7px; border-radius: 999px; background: var(--surface-2); font-size: 11px; color: var(--text-secondary); }
+  .inflight-badge { color: var(--warning); font-weight: 600; }
+  .legend { display: flex; flex-wrap: wrap; gap: 10px; font-size: 11.5px; color: var(--text-secondary); margin: 6px 0 10px; }
+  .legend .swatch { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
+  .chart-toolbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
+  .chart-toolbar button { font: inherit; font-size: 11.5px; border: 1px solid var(--border); background: var(--surface-1); color: var(--text-secondary); border-radius: 5px; padding: 3px 8px; cursor: pointer; }
+  .chart-toolbar button.active { color: var(--text-primary); border-color: var(--accent); }
+  svg text { fill: var(--text-secondary); font-size: 10px; }
+  .grid-line { stroke: var(--border); stroke-width: 1; }
+  .tooltip {
+    position: fixed; pointer-events: none; background: var(--surface-2); border: 1px solid var(--border);
+    border-radius: 6px; padding: 6px 9px; font-size: 11.5px; color: var(--text-primary); z-index: 50; display: none;
+    max-width: 280px; box-shadow: 0 4px 14px rgba(0,0,0,.18);
+  }
+  details.turn { border-bottom: 1px solid var(--border); padding: 6px 0; }
+  details.turn summary { cursor: pointer; display: grid; grid-template-columns: 130px 1fr 90px 70px; gap: 8px; align-items: baseline; }
+  details.turn summary::marker { color: var(--text-muted); }
+  .call-detail { margin: 6px 0 10px 20px; font-size: 11.5px; }
+  .call-detail .call-line { padding: 3px 0; border-bottom: 1px dashed var(--border); }
+  .empty { color: var(--text-muted); font-style: italic; padding: 10px 0; }
+  #sessionDetail { display: none; }
+  ::-webkit-scrollbar { width: 8px; height: 8px; }
+  ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+</style>
+
+<h1>Token Meter</h1>
+
+<div class="row">
+  <div class="card tile" id="tileLast60">
+    <div class="label">Last 60 min (tokens)</div>
+    <div class="value mono">-</div>
+    <div class="sub">-</div>
+  </div>
+  <div class="card tile" id="tileRate">
+    <div class="label">Rate (tok/min, last 5m)</div>
+    <div class="value mono">-</div>
+    <div class="sub">-</div>
+  </div>
+  <div class="card tile" id="tileBiggest">
+    <div class="label">Biggest call (last 60m)</div>
+    <div class="value mono">-</div>
+    <div class="sub">-</div>
+  </div>
+  <div class="card tile" id="tileActive">
+    <div class="label">Sessions active now</div>
+    <div class="value mono">-</div>
+    <div class="sub">-</div>
+  </div>
+</div>
+
+<section>
+  <h2>Live feed</h2>
+  <div class="card">
+    <div id="inflightBanner"></div>
+    <div class="feed-row" style="font-weight:600;color:var(--text-secondary);">
+      <div>time</div><div>session</div><div>model</div><div>ctx</div><div>out</div><div>tools</div>
+    </div>
+    <div class="feed-wrap" id="feed"></div>
+  </div>
+</section>
+
+<section>
+  <div class="chart-toolbar">
+    <h2 style="margin:0;">Sessions</h2>
+    <button id="toggleAllSessions">Show all</button>
+  </div>
+  <div class="card" style="overflow-x:auto;">
+    <table id="sessionsTable">
+      <thead>
+        <tr>
+          <th data-key="agentLabel">Label</th>
+          <th data-key="project">Project</th>
+          <th data-key="model">Model</th>
+          <th data-key="calls">Calls</th>
+          <th data-key="ctxNow">Context now</th>
+          <th data-key="totalTokens">Total tokens</th>
+          <th data-key="totalUSD">Total $</th>
+          <th data-key="lastHourTokens">Last 60m</th>
+          <th data-key="lastActive" class="sorted">Last active</th>
+        </tr>
+      </thead>
+      <tbody id="sessionsBody"></tbody>
+    </table>
+  </div>
+</section>
+
+<section id="sessionDetail">
+  <h2 id="detailTitle">Session detail</h2>
+  <div class="card">
+    <div class="chart-toolbar">
+      <span class="muted">Context size per call, tokens (compaction markers dashed)</span>
+    </div>
+    <div id="ctxChart"></div>
+  </div>
+  <div class="card" style="margin-top:10px;">
+    <div class="chart-toolbar">
+      <span class="muted">Per-call composition (tokens)</span>
+      <button id="toggleTable">Table view</button>
+    </div>
+    <div class="legend" id="stackLegend"></div>
+    <div id="stackChart"></div>
+    <div id="stackTable" style="display:none;overflow-x:auto;"></div>
+  </div>
+  <div class="card" style="margin-top:10px;" id="sentBreakdownCard">
+    <div class="chart-toolbar">
+      <span class="muted">What was sent (live proxy data, est. tokens): system │ tools │ cached history │ new tail</span>
+    </div>
+    <div class="legend" id="sentLegend"></div>
+    <div id="sentChart"></div>
+  </div>
+  <div class="card" style="margin-top:10px;">
+    <div class="legend"><b>fresh</b> = new tokens this call &nbsp;·&nbsp; <b>re-sent</b> = history re-read from cache</div>
+    <div id="turnsList"></div>
+  </div>
+</section>
+
+<div class="tooltip" id="tooltip"></div>
+
+<script>
+'use strict';
+
+const STATE = {
+  sessions: [], calls: [], turns: [], events: [], live: new Map(),
+  sortKey: 'lastActive', sortDir: 'desc',
+  selectedKey: null, detail: null, stackTableMode: false, showAllSessions: false,
+};
+
+function fmtK(n) {
+  if (n == null) return '?';
+  const abs = Math.abs(n);
+  if (abs >= 1e6) return (n / 1e6).toFixed(2) + 'M';
+  if (abs >= 1000) return (n / 1000).toFixed(1) + 'k';
+  return String(Math.round(n));
+}
+function fmtUSD(n) { return n == null ? '?' : '$' + n.toFixed(2); }
+function fmtTime(ts) { try { return new Date(ts).toLocaleTimeString(); } catch (e) { return ts; } }
+function fmtElapsed(sinceISO) {
+  const secs = Math.max(0, Math.round((Date.now() - new Date(sinceISO).getTime()) / 1000));
+  return secs < 60 ? secs + 's' : Math.floor(secs / 60) + 'm' + (secs % 60) + 's';
+}
+
+async function fetchState() {
+  const res = await fetch('/api/state');
+  const data = await res.json();
+  STATE.sessions = data.sessions;
+  STATE.calls = data.calls;
+  STATE.turns = data.turns;
+  STATE.events = data.events;
+  STATE.live = new Map((data.live || []).map(lc => [lc.reqId, lc]));
+  renderHeader();
+  renderSessions();
+  renderFeedInitial();
+  renderLiveRows();
+}
+
+function renderHeader() {
+  const now = Date.now();
+  const min5Ago = now - 5 * 60 * 1000;
+  const hourAgo = now - 3600 * 1000;
+  const last60 = STATE.calls.filter(c => new Date(c.ts).getTime() >= hourAgo);
+  const fresh = last60.reduce((a, c) => a + c.fresh, 0);
+  const resent = last60.reduce((a, c) => a + c.resent, 0);
+  const out = last60.reduce((a, c) => a + c.out, 0);
+
+  const t60 = document.querySelector('#tileLast60');
+  t60.querySelector('.value').textContent = fmtK(fresh + resent + out);
+  t60.querySelector('.sub').textContent = fmtK(fresh) + ' fresh / ' + fmtK(resent) + ' re-sent / ' + fmtK(out) + ' out';
+
+  const last5 = last60.filter(c => new Date(c.ts).getTime() >= min5Ago);
+  const tokensLast5 = last5.reduce((a, c) => a + c.fresh + c.resent + c.out, 0);
+  const rate = tokensLast5 / 5;
+  const tRate = document.querySelector('#tileRate');
+  tRate.querySelector('.value').textContent = fmtK(rate) + '/min';
+  tRate.querySelector('.sub').textContent = last5.length + ' calls in last 5 min';
+
+  let biggest = null;
+  for (const c of last60) {
+    const total = c.fresh + c.resent + c.out;
+    if (!biggest || total > biggest._total) biggest = Object.assign({ _total: total }, c);
+  }
+  const tBig = document.querySelector('#tileBiggest');
+  if (biggest) {
+    tBig.querySelector('.value').textContent = fmtK(biggest._total);
+    tBig.querySelector('.sub').textContent = biggest.model.replace('claude-', '') + ' · ' + (biggest.agentLabel || biggest.sessionId.slice(0, 8)) + ' · ' + fmtTime(biggest.ts);
+  } else {
+    tBig.querySelector('.value').textContent = '-';
+    tBig.querySelector('.sub').textContent = 'no calls in the last hour';
+  }
+
+  const activeNow = STATE.sessions.filter(s => s.inFlightSince || (s.lastActive && new Date(s.lastActive).getTime() >= min5Ago)).length;
+  const tAct = document.querySelector('#tileActive');
+  tAct.querySelector('.value').textContent = activeNow;
+  const inflightCount = STATE.sessions.filter(s => s.inFlightSince).length;
+  tAct.querySelector('.sub').textContent = inflightCount ? inflightCount + ' in flight' : 'none in flight';
+}
+
+// Tier 2 (live.jsonl via proxy.cjs) gives exact ticking rows -- pending /
+// streaming calls with a live out-token estimate. Tier 1 fallback (no
+// live.jsonl): the coarser elapsed-time "in flight" badge from transcripts.
+function renderLiveRows() {
+  const banner = document.getElementById('inflightBanner');
+  const liveList = [...STATE.live.values()].filter(lc => lc.status !== 'done');
+  if (!liveList.length) {
+    const inflight = STATE.sessions.filter(s => s.inFlightSince);
+    banner.innerHTML = inflight.map(s =>
+      '<div class="feed-row inflight-banner">⏳ in flight ' + fmtElapsed(s.inFlightSince) + ' — ' + (s.agentLabel || s.sessionId.slice(0, 12)) + '</div>'
+    ).join('');
+    return;
+  }
+  banner.innerHTML = liveList.map(lc => {
+    const secs = ((Date.now() - new Date(lc.ts).getTime()) / 1000).toFixed(1);
+    const label = (lc.agentId || lc.sessionId || '').slice(0, 16);
+    const text = lc.status === 'pending' ? 'waiting for first byte' : 'streaming ' + fmtK(lc.outEst) + ' out~';
+    return '<div class="feed-row inflight-banner">⏳ ' + text + ' (' + secs + 's) — ' + (lc.model || '?').replace('claude-', '') + ' · ' + label + '</div>';
+  }).join('');
+}
+setInterval(renderLiveRows, 500); // ticks faster than the plain elapsed-time badge since live progress moves quickly
+
+function renderFeedInitial() {
+  const feed = document.getElementById('feed');
+  feed.innerHTML = '';
+  STATE.calls.slice(-40).reverse().forEach(c => feed.appendChild(feedRow(c)));
+}
+function feedRow(c, isNew) {
+  const row = document.createElement('div');
+  row.className = 'feed-row' + (isNew ? ' new' : '');
+  row.innerHTML =
+    '<div class="mono muted">' + fmtTime(c.ts) + '</div>' +
+    '<div>' + (c.agentId ? c.agentLabel : c.sessionId).slice(0, 26) + '</div>' +
+    '<div>' + c.model.replace('claude-', '') + '</div>' +
+    '<div class="mono">' + fmtK(c.ctx) + '</div>' +
+    '<div class="mono">' + fmtK(c.out) + '</div>' +
+    '<div class="muted">' + c.tools.join(',') + '</div>';
+  return row;
+}
+
+function sessionRowValue(s, key) {
+  if (key === 'totalTokens') return s.total.ctx;
+  if (key === 'totalUSD') return s.total.costUSD;
+  if (key === 'lastHourTokens') return s.lastHour.ctx;
+  return s[key];
+}
+
+document.getElementById('toggleAllSessions').addEventListener('click', () => {
+  STATE.showAllSessions = !STATE.showAllSessions;
+  document.getElementById('toggleAllSessions').classList.toggle('active', STATE.showAllSessions);
+  document.getElementById('toggleAllSessions').textContent = STATE.showAllSessions ? 'Show active only' : 'Show all';
+  renderSessions();
+});
+
+function renderSessions() {
+  const tbody = document.getElementById('sessionsBody');
+  const hourAgo = Date.now() - 60 * 60 * 1000;
+  let rows = STATE.sessions.slice();
+  const totalCount = rows.length;
+  if (!STATE.showAllSessions) {
+    rows = rows.filter(s => s.inFlightSince || (s.lastActive && new Date(s.lastActive).getTime() >= hourAgo));
+  }
+  rows.sort((a, b) => {
+    const av = sessionRowValue(a, STATE.sortKey), bv = sessionRowValue(b, STATE.sortKey);
+    if (av == null && bv == null) return 0;
+    if (av == null) return 1;
+    if (bv == null) return -1;
+    const cmp = av > bv ? 1 : av < bv ? -1 : 0;
+    return STATE.sortDir === 'asc' ? cmp : -cmp;
+  });
+  const btn = document.getElementById('toggleAllSessions');
+  btn.textContent = STATE.showAllSessions ? `Show active only (${totalCount} total)` : `Show all (${totalCount} total, ${rows.length} active)`;
+  tbody.innerHTML = '';
+  for (const s of rows) {
+    const tr = document.createElement('tr');
+    tr.className = 'session-row' + (s.inFlightSince ? ' inflight' : '');
+    tr.dataset.key = s.key;
+    const status = s.inFlightSince ? '<span class="inflight-badge">⏳ in flight ' + fmtElapsed(s.inFlightSince) + '</span>' : (s.lastActive ? fmtTime(s.lastActive) : '—');
+    tr.innerHTML =
+      '<td>' + (s.agentLabel || s.sessionId.slice(0, 8)) + '</td>' +
+      '<td class="muted">' + s.project + '</td>' +
+      '<td>' + (s.model ? s.model.replace('claude-', '') : '?') + '</td>' +
+      '<td class="mono">' + s.calls + '</td>' +
+      '<td class="mono">' + fmtK(s.ctxNow) + '</td>' +
+      '<td class="mono">' + fmtK(s.total.ctx) + '</td>' +
+      '<td class="mono">' + fmtUSD(s.total.costUSD) + '</td>' +
+      '<td class="mono">' + fmtK(s.lastHour.ctx) + '</td>' +
+      '<td class="muted">' + status + '</td>';
+    tr.addEventListener('click', () => openSession(s.key));
+    tbody.appendChild(tr);
+  }
+}
+
+document.querySelectorAll('#sessionsTable th').forEach(th => {
+  th.addEventListener('click', () => {
+    const key = th.dataset.key;
+    if (STATE.sortKey === key) STATE.sortDir = STATE.sortDir === 'asc' ? 'desc' : 'asc';
+    else { STATE.sortKey = key; STATE.sortDir = 'desc'; }
+    document.querySelectorAll('#sessionsTable th').forEach(x => x.classList.remove('sorted'));
+    th.classList.add('sorted');
+    renderSessions();
+  });
+});
+
+async function openSession(key) {
+  STATE.selectedKey = key;
+  const res = await fetch('/api/session/' + encodeURIComponent(key));
+  if (!res.ok) return;
+  STATE.detail = await res.json();
+  document.getElementById('sessionDetail').style.display = 'block';
+  document.getElementById('detailTitle').textContent = 'Session detail — ' + (STATE.detail.summary.agentLabel || STATE.detail.summary.sessionId);
+  renderDetail();
+}
+
+function renderDetail() {
+  renderCtxChart();
+  renderStackChart();
+  renderSentBreakdown();
+  renderTurns();
+}
+
+// --- Tier 2: "what was sent" per call, from live.jsonl's request-side
+// breakdown (system/tools/cached-history/new-tail), scaled to est. tokens.
+// Joined transcript calls carry it as call.sentBreakdown; a call still
+// in-flight for THIS session carries it directly on the live entry.
+const SENT_ORDER = [['system', '--s4', 'System'], ['tools', '--s2', 'Tools'], ['cachedPrefix', '--s1', 'Cached history'], ['newTail', '--s6', 'New tail']];
+function renderSentBreakdown() {
+  const card = document.getElementById('sentBreakdownCard');
+  const rows = [];
+  for (const c of STATE.detail.calls) {
+    if (c.sentBreakdown) rows.push({ ts: c.ts, model: c.model, est: c.sentBreakdown });
+  }
+  for (const lc of STATE.detail.live || []) {
+    // Done calls are already represented above via the transcript join
+    // (call.sentBreakdown) once it lands -- only show still-in-flight ones
+    // here, or a finished call briefly renders twice.
+    if (lc.status !== 'done' && lc.breakdownTokensEst) rows.push({ ts: lc.ts, model: lc.model, est: lc.breakdownTokensEst, inFlight: true });
+  }
+  if (!rows.length) {
+    card.querySelector('#sentLegend').innerHTML = '<span class="muted">No live proxy data for this session (Tier 2 / proxy.cjs not in the loop for these calls).</span>';
+    document.getElementById('sentChart').innerHTML = '';
+    return;
+  }
+  rows.sort((a, b) => new Date(a.ts) - new Date(b.ts));
+  card.querySelector('#sentLegend').innerHTML = SENT_ORDER.map(([k, v, label]) =>
+    '<span><span class="swatch" style="background:var(' + v + ')"></span>' + label + '</span>').join('');
+  const w = 760, h = 140, pad = 24, barGap = 3;
+  const totals = rows.map(r => SENT_ORDER.reduce((a, [k]) => a + (r.est[k] || 0), 0));
+  const maxV = Math.max(1, ...totals);
+  const barW = Math.max(3, (w - pad * 2) / rows.length - barGap);
+  let svg = '<svg viewBox="0 0 ' + w + ' ' + h + '" width="100%" style="max-width:' + w + 'px">';
+  rows.forEach((r, i) => {
+    let yCursor = h - pad;
+    const x0 = pad + i * ((w - pad * 2) / rows.length);
+    SENT_ORDER.forEach(([k, v]) => {
+      const val = r.est[k] || 0;
+      const segH = (val / maxV) * (h - pad * 2);
+      if (segH > 0.15) svg += '<rect x="' + x0 + '" y="' + (yCursor - segH) + '" width="' + barW + '" height="' + Math.max(0, segH - 1) + '" fill="var(' + v + ')" opacity="' + (r.inFlight ? 0.55 : 1) + '"/>';
+      yCursor -= segH;
+    });
+  });
+  svg += '</svg>';
+  document.getElementById('sentChart').innerHTML = svg;
+}
+
+// --- (a) line chart: context size (tokens) per call, with compaction markers ---
+function renderCtxChart() {
+  const calls = STATE.detail.calls;
+  const w = 760, h = 160, pad = 24;
+  const el = document.getElementById('ctxChart');
+  if (!calls.length) { el.innerHTML = '<div class="empty">No calls yet.</div>'; return; }
+  const values = calls.map(c => c.ctx);
+  const maxV = Math.max(1, ...values);
+  const x = i => pad + (i / Math.max(1, calls.length - 1)) * (w - pad * 2);
+  const y = v => h - pad - (v / maxV) * (h - pad * 2);
+  let path = 'M ' + calls.map((c, i) => x(i) + ' ' + y(values[i])).join(' L ');
+  const sessionId = STATE.detail.summary.sessionId;
+  const compactions = STATE.events.filter(e => e.kind === 'compact' && e.sessionId === sessionId);
+  let svg = '<svg viewBox="0 0 ' + w + ' ' + h + '" width="100%" style="max-width:' + w + 'px">';
+  for (let g = 0; g <= 4; g++) {
+    const gy = pad + (g / 4) * (h - pad * 2);
+    svg += '<line class="grid-line" x1="' + pad + '" x2="' + (w - pad) + '" y1="' + gy + '" y2="' + gy + '"/>';
+  }
+  compactions.forEach(ev => {
+    const t = new Date(ev.ts).getTime();
+    let idx = calls.findIndex(c => new Date(c.ts).getTime() >= t);
+    if (idx === -1) idx = calls.length - 1;
+    svg += '<line x1="' + x(idx) + '" x2="' + x(idx) + '" y1="' + pad + '" y2="' + (h - pad) + '" stroke="var(--critical)" stroke-width="1.5" stroke-dasharray="4,3"/>';
+    svg += '<text x="' + (x(idx) + 3) + '" y="' + (pad + 9) + '">compact</text>';
+  });
+  svg += '<path d="' + path + '" fill="none" stroke="var(--s1)" stroke-width="2"/>';
+  calls.forEach((c, i) => {
+    svg += '<circle cx="' + x(i) + '" cy="' + y(values[i]) + '" r="3" fill="var(--s1)" data-idx="' + i + '" class="pt"/>';
+  });
+  svg += '</svg>';
+  el.innerHTML = svg;
+  el.querySelectorAll('.pt').forEach(pt => {
+    pt.addEventListener('mousemove', (e) => showTooltip(e, ctxPointTooltip(calls[+pt.dataset.idx])));
+    pt.addEventListener('mouseleave', hideTooltip);
+  });
+}
+function ctxPointTooltip(c) {
+  return fmtTime(c.ts) + '<br>' + c.model.replace('claude-', '') + '<br>ctx ' + fmtK(c.ctx) + ' · ' + fmtUSD(c.costUSD);
+}
+
+// --- (b) stacked bars per call, tokens: cache read | 1h write | 5m write | uncached input | thinking | visible output ---
+function seriesFor(c) {
+  return { cr: c.cr, cw1h: c.cw1h, cw5m: c.cw5m, input: c.input, thinking: c.thinking, out: Math.max(0, c.out - c.thinking) };
+}
+const STACK_ORDER = [['cr', '--s1', 'Cache read'], ['cw1h', '--s2', '1h write'], ['cw5m', '--s3', '5m write'], ['input', '--s4', 'Uncached input'], ['thinking', '--s5', 'Thinking'], ['out', '--s6', 'Visible output']];
+
+function renderStackChart() {
+  document.getElementById('stackLegend').innerHTML = STACK_ORDER.map(([k, v, label]) =>
+    '<span><span class="swatch" style="background:var(' + v + ')"></span>' + label + '</span>').join('');
+  const calls = STATE.detail.calls;
+  document.getElementById('toggleTable').onclick = () => {
+    STATE.stackTableMode = !STATE.stackTableMode;
+    document.getElementById('toggleTable').classList.toggle('active', STATE.stackTableMode);
+    document.getElementById('stackChart').style.display = STATE.stackTableMode ? 'none' : '';
+    document.getElementById('stackTable').style.display = STATE.stackTableMode ? '' : 'none';
+    if (STATE.stackTableMode) renderStackTable(calls);
+  };
+  if (STATE.stackTableMode) { renderStackTable(calls); return; }
+  const el = document.getElementById('stackChart');
+  if (!calls.length) { el.innerHTML = '<div class="empty">No calls yet.</div>'; return; }
+  const w = 760, h = 180, pad = 24, barGap = 2;
+  const series = calls.map(seriesFor);
+  const totals = series.map(s => STACK_ORDER.reduce((a, [k]) => a + (s[k] || 0), 0));
+  const maxV = Math.max(1, ...totals);
+  const barW = Math.max(2, (w - pad * 2) / calls.length - barGap);
+  let svg = '<svg viewBox="0 0 ' + w + ' ' + h + '" width="100%" style="max-width:' + w + 'px">';
+  calls.forEach((c, i) => {
+    let yCursor = h - pad;
+    const x0 = pad + i * ((w - pad * 2) / calls.length);
+    STACK_ORDER.forEach(([k, v]) => {
+      const val = series[i][k] || 0;
+      const segH = (val / maxV) * (h - pad * 2);
+      if (segH > 0.15) {
+        svg += '<rect x="' + x0 + '" y="' + (yCursor - segH) + '" width="' + barW + '" height="' + Math.max(0, segH - 1) + '" fill="var(' + v + ')" data-idx="' + i + '" data-k="' + k + '" class="seg"/>';
+      }
+      yCursor -= segH;
+    });
+  });
+  svg += '</svg>';
+  el.innerHTML = svg;
+  el.querySelectorAll('.seg').forEach(seg => {
+    seg.addEventListener('mousemove', (e) => showTooltip(e, stackTooltip(calls[+seg.dataset.idx], series[+seg.dataset.idx])));
+    seg.addEventListener('mouseleave', hideTooltip);
+  });
+}
+function stackTooltip(c, s) {
+  return fmtTime(c.ts) + '<br>' + STACK_ORDER.map(([k, , label]) => label + ': ' + fmtK(s[k] || 0)).join('<br>');
+}
+function renderStackTable(calls) {
+  const series = calls.map(seriesFor);
+  let html = '<table><thead><tr><th>time</th>' + STACK_ORDER.map(([, , l]) => '<th>' + l + '</th>').join('') + '</tr></thead><tbody>';
+  calls.forEach((c, i) => {
+    html += '<tr><td class="mono muted">' + fmtTime(c.ts) + '</td>' + STACK_ORDER.map(([k]) => '<td class="mono">' + fmtK(series[i][k]) + '</td>').join('') + '</tr>';
+  });
+  html += '</tbody></table>';
+  document.getElementById('stackTable').innerHTML = html;
+}
+
+// --- (c) turns, newest first, expandable ---
+function renderTurns() {
+  const list = document.getElementById('turnsList');
+  const turns = STATE.detail.turns.slice().reverse();
+  if (!turns.length) { list.innerHTML = '<div class="empty">No turns yet.</div>'; return; }
+  list.innerHTML = '';
+  for (const t of turns) {
+    const det = document.createElement('details');
+    det.className = 'turn';
+    const sums = t.sums || { ctx: 0, costUSD: null, calls: (t.calls || []).length };
+    det.innerHTML =
+      '<summary>' +
+      '<span class="mono muted">' + fmtTime(t.ts) + '</span>' +
+      '<span>' + (t.promptPreview || '(no preview)') + '</span>' +
+      '<span class="pill">' + (t.source || 'unknown') + '</span>' +
+      '<span class="mono">' + fmtK(sums.ctx) + '</span>' +
+      '</summary>';
+    const body = document.createElement('div');
+    body.className = 'call-detail';
+    (t.calls || []).forEach(c => {
+      const fedIn = (c.fedIn || []).map(f => f.tool + ' (' + fmtK(f.bytes / 4) + ' est.)').join(', ') || '—';
+      const injected = (c.injected || []).map(i => i.type + ' (' + fmtK(i.bytes / 4) + ' est.)').join(', ') || '—';
+      const line = document.createElement('div');
+      line.className = 'call-line';
+      line.innerHTML =
+        '<span class="mono muted">' + fmtTime(c.ts) + '</span> ' +
+        '<b>' + c.model.replace('claude-', '') + '</b> · ' +
+        'fresh ' + fmtK(c.fresh) + ' / re-sent ' + fmtK(c.resent) + ' · out ' + fmtK(c.out) + ' (' + fmtK(c.thinking) + ' think) · ' + fmtUSD(c.costUSD) +
+        '<br><span class="muted">tools:</span> ' + (c.tools.join(', ') || '—') +
+        '<br><span class="muted">fed in:</span> ' + fedIn +
+        '<br><span class="muted">injected:</span> ' + injected;
+      body.appendChild(line);
+    });
+    det.appendChild(body);
+    list.appendChild(det);
+  }
+}
+
+function showTooltip(e, html) {
+  const tip = document.getElementById('tooltip');
+  tip.innerHTML = html;
+  tip.style.display = 'block';
+  tip.style.left = (e.clientX + 14) + 'px';
+  tip.style.top = (e.clientY + 14) + 'px';
+}
+function hideTooltip() { document.getElementById('tooltip').style.display = 'none'; }
+
+// --- live updates ---
+function connectSSE() {
+  const es = new EventSource('/events');
+  es.onmessage = (ev) => {
+    let msg;
+    try { msg = JSON.parse(ev.data); } catch (e) { return; }
+    if (msg.type === 'call') {
+      STATE.calls.push(msg.data);
+      if (STATE.calls.length > 500) STATE.calls.shift();
+      const feed = document.getElementById('feed');
+      feed.insertBefore(feedRow(msg.data, true), feed.firstChild);
+      while (feed.children.length > 40) feed.removeChild(feed.lastChild);
+      if (STATE.selectedKey && (msg.data.agentId ? msg.data.sessionId + ':' + msg.data.agentId : msg.data.sessionId) === STATE.selectedKey) {
+        debouncedRefreshDetail();
+      }
+    } else if (msg.type === 'inflight') {
+      // A user prompt/tool_result just landed with no call after it yet --
+      // resync session summaries promptly so the ⏳ badge shows without
+      // waiting for the 10s poll.
+      debouncedResync();
+    } else if (msg.type === 'live') {
+      STATE.live.set(msg.data.reqId, msg.data);
+      renderLiveRows();
+      if (STATE.selectedKey) {
+        const key = msg.data.agentId ? msg.data.sessionId + ':' + msg.data.agentId : msg.data.sessionId;
+        if (key === STATE.selectedKey) debouncedRefreshDetail();
+      }
+    }
+  };
+  es.onerror = () => { /* browser auto-reconnects EventSource */ };
+}
+let refreshTimer = null;
+function debouncedRefreshDetail() {
+  if (refreshTimer) return;
+  refreshTimer = setTimeout(async () => {
+    refreshTimer = null;
+    if (STATE.selectedKey) await openSession(STATE.selectedKey);
+  }, 1000);
+}
+let resyncTimer = null;
+function debouncedResync() {
+  if (resyncTimer) return;
+  resyncTimer = setTimeout(async () => {
+    resyncTimer = null;
+    await fetchState().catch(() => {});
+  }, 800);
+}
+
+// Periodic resync of aggregates (sessions table, header tiles) - cheap single fetch.
+setInterval(() => { fetchState().catch(() => {}); }, 10000);
+
+fetchState().catch(() => {});
+connectSSE();
+</script>

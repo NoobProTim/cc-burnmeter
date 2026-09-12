@@ -1,0 +1,38 @@
+{
+  "name": "cc-burnmeter",
+  "version": "0.1.0",
+  "description": "Real-time token consumption viewer for Claude Code: every API call, what was re-sent, what was new, what came back — from the transcripts and, optionally, a local pass-through proxy.",
+  "license": "MIT",
+  "author": "Timothy Joshua",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/NoobProTim/cc-burnmeter.git"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "bin": {
+    "cc-burnmeter": "meter.cjs"
+  },
+  "scripts": {
+    "test": "node meter.cjs --selftest && node proxy.cjs --selftest",
+    "serve": "node meter.cjs --serve 4777",
+    "proxy": "node proxy.cjs"
+  },
+  "files": [
+    "meter.cjs",
+    "meter.html",
+    "proxy.cjs",
+    "statusline.cjs",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "claude-code",
+    "tokens",
+    "usage",
+    "meter",
+    "dashboard",
+    "statusline"
+  ]
+}
