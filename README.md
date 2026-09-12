@@ -17,7 +17,11 @@ and what it cost at list price. No quota percentages: Claude Code already shows 
 
 **Read before enabling the proxy:** with `ANTHROPIC_BASE_URL` pointed at any non-Anthropic host,
 Claude Code itself turns off Remote Control and server-managed settings, and tool search and
-fine-grained tool streaming default off (the installer restores streaming). See
+fine-grained tool streaming default off (the installer restores streaming). **Also set
+`ENABLE_TOOL_SEARCH=true`:** without it every MCP tool schema is sent on every call (measured 542 KB vs
+91 KB), which roughly triples the post-compaction floor and makes sessions auto-compact in a loop. **And pick
+a `[1m]` model** (e.g. `sonnet[1m]`): behind a custom base URL Claude Code budgets Sonnet 5 / Fable at 200K instead
+of 1M, so sessions auto-compact at ~170k. See
 https://code.claude.com/docs/en/feature-availability.md.
 
 ## Run

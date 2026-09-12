@@ -1,11 +1,17 @@
 # Token meter — what was wired on this Mac (2026-09-12) and how to undo it
 
+> **STATUS 2026-09-12 ~21:05 UTC — proxy UNWIRED (quick unwire: `env.ANTHROPIC_BASE_URL` removed).** Behind the
+> custom base URL, Claude Code budgeted 1M models (Sonnet 5, Fable) at 200K and turned tool search off. Sessions
+> auto-compacted in a loop at 168k-333k. The launchd services still run idle, and the transcript tier + statusline still work.
+> To re-wire, you need `ENABLE_TOOL_SEARCH=true` AND a `[1m]` model in every session.
+
 ## What is installed
 - `~/Library/LaunchAgents/com.noobprotim.token-meter-proxy.plist` — runs `proxy.cjs` on 127.0.0.1:4778, KeepAlive (restarts within ~2s if it dies). Log: `~/.claude/token-meter/proxy.log`.
 - `~/Library/LaunchAgents/com.noobprotim.token-meter-dashboard.plist` — runs `meter.cjs --serve 4777 --hours 24`. Open http://127.0.0.1:4777/. Log: `dashboard.log`.
 - `~/.claude/settings.json` gained:
   - `env.ANTHROPIC_BASE_URL = http://127.0.0.1:4778` (every NEW Claude Code session routes through the proxy; sessions already open keep going direct)
   - `env.CLAUDE_CODE_ENABLE_FINE_GRAINED_TOOL_STREAMING = 1` (restores a feature Claude Code turns off behind any custom base URL)
+  - `env.ENABLE_TOOL_SEARCH = true` (added 2026-09-12 evening — behind a custom base URL tool search defaults OFF, so all 215 MCP/builtin tool schemas (~542 KB) were sent on every call; that pushed the post-compact floor to ~331k and made Sonnet sessions auto-compact in a loop. The proxy forwards headers/body intact, which tool search needs. Rollback: delete this line.)
   - `statusLine` → `node ~/.claude/token-meter/statusline.cjs`
 - Backup of the pre-wire settings: `~/.claude/settings.json.bak-2026-09-12-token-meter`.
 
