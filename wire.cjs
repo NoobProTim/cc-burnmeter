@@ -89,6 +89,12 @@ function isOurStatusLine(statusLine) {
   return typeof cmd === 'string' && cmd.includes('statusline.cjs');
 }
 
+function with1m(model) {
+  if (!model) return 'sonnet[1m]';
+  if (/\[1m\]$/.test(model)) return model;
+  return `${model}[1m]`;
+}
+
 function parseArgs(argv) {
   return {
     proxy: argv.includes('--proxy'),
@@ -137,9 +143,19 @@ async function cmdWire(argv) {
       ENABLE_TOOL_SEARCH: 'true',
       CLAUDE_CODE_ENABLE_FINE_GRAINED_TOOL_STREAMING: '1',
     });
+    // Behind a custom base URL, Claude Code can't verify 1M-context support and
+    // silently budgets 1M models (Sonnet, Fable) at 200K -- the other half of
+    // the compact-thrash bug (see ROLLBACK.md). The [1m] suffix forces the beta
+    // header regardless of base URL. Sub-agent/background Haiku calls are
+    // unaffected (real 200K window), so this must be per-model, never a global
+    // CLAUDE_CODE_MAX_CONTEXT_TOKENS override.
+    const priorModel = settings.model;
+    settings.model = with1m(settings.model);
     settings.statusLine = { type: 'command', command: `${process.execPath} ${ABS_STATUSLINE}` };
     writeJSONAtomic(SETTINGS_FILE, settings);
     console.log(`wired (proxy tier): ANTHROPIC_BASE_URL -> http://127.0.0.1:${port}, statusLine -> ${ABS_STATUSLINE}`);
+    console.log(`model -> ${settings.model}${priorModel ? ` (was ${priorModel})` : ' (was unset, defaulted)'} -- required to keep the 1M context window behind the proxy`);
+    console.log('Restart any ALREADY-OPEN session -- Claude Code reads these at startup, not mid-session. New sessions pick this up automatically.');
     return 0;
   }
 
@@ -173,6 +189,8 @@ function cmdDoctor() {
     lines.push(`ANTHROPIC_BASE_URL: ${base || '(not set -- direct to api.anthropic.com)'}`);
     if (base) {
       lines.push(`ENABLE_TOOL_SEARCH: ${(settings.env && settings.env.ENABLE_TOOL_SEARCH) || 'MISSING -- tool search defaults OFF behind a custom base URL'}`);
+      const model = settings.model;
+      lines.push(`model: ${model || 'MISSING'}${model && /\[1m\]$/.test(model) ? '' : '  MISSING [1m] suffix -- 1M models silently budgeted at 200K behind a custom base URL (this is what causes compact-thrash loops)'}`);
     }
     lines.push(`statusLine: ${settings.statusLine ? JSON.stringify(settings.statusLine) : '(not set)'}`);
   }
@@ -309,6 +327,7 @@ async function runSelftest() {
     const settings = JSON.parse(fs.readFileSync(path.join(tmp, 'settings.json'), 'utf8'));
     assert(settings.env.ANTHROPIC_BASE_URL === `http://127.0.0.1:${port}`, 'ANTHROPIC_BASE_URL not wired to the proxy port');
     assert(settings.env.ENABLE_TOOL_SEARCH === 'true', 'ENABLE_TOOL_SEARCH not set');
+    assert(/\[1m\]$/.test(settings.model || ''), 'model missing [1m] suffix -- 1M models would be budgeted at 200K behind the proxy');
     fs.rmSync(tmp, { recursive: true, force: true });
   });
 
