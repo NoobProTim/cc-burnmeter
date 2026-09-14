@@ -7,7 +7,5 @@
   "author": { "name": "Timothy Joshua", "url": "https://github.com/NoobProTim" },
   "repository": "https://github.com/NoobProTim/cc-burnmeter",
   "license": "MIT",
-  "keywords": ["tokens", "usage", "dashboard", "statusline", "context"],
-  "skills": "./skills/",
-  "hooks": "./hooks/hooks.json"
+  "keywords": ["tokens", "usage", "dashboard", "statusline", "context"]
 }

@@ -12,6 +12,12 @@ Method: imagine it shipped and failed, then **test the failure before writing it
 
 ## 0. The one-paragraph verdict
 
+**Update, same day:** the P0 set below is applied (`9173d38`), the repo is public, and the install
+was run from GitHub into a real project. That install found a **second** blocker the validator cannot
+see (a duplicate-hooks load failure, fixed in the manifest) — which is the whole argument for §4
+step 3. Hook rewritten in Node, ownership handshake on the port, token never logged, autostart
+opt-out, `stop`, version-match test: 54/54 tests.
+
 The plugin would have failed at the first command. `claude plugin validate` rejected the marketplace
 manifest (`name` missing, `owner` not an object, `source` given as an object instead of the string
 `"./"`), so `/plugin marketplace add NoobProTim/cc-burnmeter` would have errored for every reader of
@@ -36,6 +42,8 @@ run once from GitHub on a machine that is not this one.**
 | Live interactive sessions on this machine right now | 5 | five hooks race at reboot; the port check serialises them (see curl-less row) |
 | `claude plugin details` | needs the plugin installed; `--plugin-dir` not accepted by this CLI build | token-cost inventory deferred to the install test |
 | Dashboard log after a hook start | first line is `http://127.0.0.1:4777/?token=<hex>` | the bearer token is in a 0644 file under `CLAUDE_PLUGIN_DATA` |
+| **Install from the public GitHub marketplace** (after the flip, project scope, this repo) | installs, then `Status: ✘ failed to load — Duplicate hooks file`: `hooks/hooks.json` is loaded automatically and `manifest.hooks` pointed at it too | a second install-blocking defect the validator does NOT catch; only a real install does → FIXED by dropping `hooks`/`skills` from `plugin.json` (both default paths are auto-discovered) |
+| `claude plugin details` after install | Skills 1, Hooks 1 (harness-only); always-on ~103 tokens per session, ~1.4k on `/token-meter` invoke | the plugin's context cost is two lines of the skill listing; acceptable |
 
 ---
 
