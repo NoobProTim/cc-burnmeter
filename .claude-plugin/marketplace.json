@@ -1,12 +1,16 @@
 {
-  "owner": "NoobProTim",
+  "name": "cc-burnmeter",
+  "description": "CC-Burnmeter: a real-time token meter for Claude Code. Transcript tier by default; an opt-in local proxy for exact wire bytes.",
+  "owner": { "name": "Timothy Joshua", "url": "https://github.com/NoobProTim" },
   "plugins": [
     {
       "name": "cc-burnmeter",
-      "displayName": "CC-Burnmeter",
-      "description": "Real-time token meter for Claude Code. Transcript tier by default; an opt-in local proxy for exact wire bytes.",
+      "source": "./",
+      "description": "Real-time token meter for Claude Code: every API call, who caused it, what was re-sent, what was injected, what came back. Nothing leaves the machine.",
       "version": "0.2.0",
-      "source": { "type": "path", "path": "./" }
+      "author": { "name": "Timothy Joshua", "url": "https://github.com/NoobProTim" },
+      "homepage": "https://github.com/NoobProTim/cc-burnmeter",
+      "license": "MIT"
     }
   ]
 }

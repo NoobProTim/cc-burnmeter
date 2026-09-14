@@ -7,3 +7,6 @@ live.*.jsonl
 shots/
 node_modules/
 .DS_Store
+
+# founder marketing material (LinkedIn carousel + post); not part of the shipped tool
+marketing/
