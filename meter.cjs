@@ -81,8 +81,8 @@ function priceFor(model, speed) {
 // ---------------------------------------------------------------------------
 function stripSlugPrefix(slug) {
   // Claude Code slugifies a project's absolute cwd by replacing path
-  // separators with '-' (e.g. /Users/tj/foo -> -Users-tj-foo, and the same
-  // on Windows with backslashes). Derive the home prefix from the real
+  // separators with '-' (e.g. /Users/alice/foo -> -Users-alice-foo, and the
+  // same on Windows with backslashes). Derive the home prefix from the real
   // homedir (not CONFIG_DIR, which may be relocated) instead of a literal.
   const homePrefix = os.homedir().replace(/[\\/]/g, '-') + '-';
   const stripped = slug.startsWith(homePrefix) ? slug.slice(homePrefix.length) : slug;
@@ -105,6 +105,51 @@ function extractText(content) {
 
 function hasToolResult(content) {
   return Array.isArray(content) && content.some((c) => c.type === 'tool_result');
+}
+
+// Who caused this turn? `isMeta` alone cannot tell: task notifications, compaction
+// summaries, slash-command expansions and cron wakeups all arrive as ordinary user
+// records. Classify by content shape instead. `label` is never private prompt text --
+// it is a task id, a command name or a skill name, so it is safe to show even with
+// prompt previews off. Kinds: founder | task | slash | local | compaction | cron |
+// interrupt | skill | image | meta.
+function classifySource(text, record) {
+  const t = (text || '').replace(/^\s+/, '');
+  if (record && record.isMeta === true) {
+    if (/^\[Image/.test(t)) return { kind: 'image', label: 'image' };
+    const m = /Base directory for this skill: .*?[\\/]skills[\\/]([^\s\\/]+)/.exec(t) || /<command-name>\/?([^<]+)<\/command-name>/.exec(t);
+    if (m) return { kind: 'skill', label: m[1].trim() };
+    return { kind: 'meta', label: null };
+  }
+  if (/^<task-notification>/.test(t)) {
+    const m = /<task-id>([^<]+)<\/task-id>/.exec(t);
+    return { kind: 'task', label: m ? m[1].trim() : null };
+  }
+  if (/^<command-(name|message)>/.test(t)) {
+    const m = /<command-name>\/?([^<]+)<\/command-name>/.exec(t);
+    return { kind: 'slash', label: m ? '/' + m[1].trim() : null };
+  }
+  if (/^<local-command-(stdout|caveat)>/.test(t)) return { kind: 'local', label: null };
+  if (/^This session is being continued from a previous conversation/.test(t)) return { kind: 'compaction', label: 'summary' };
+  if (/^\[Request interrupted/.test(t)) return { kind: 'interrupt', label: null };
+  if (/^Scheduled wakeup|<<autonomous-loop|^\/loop\b/i.test(t)) return { kind: 'cron', label: null };
+  if (/^\/[a-z][\w:-]*(\s|$)/i.test(t)) return { kind: 'slash', label: t.split(/\s/)[0] };
+  return { kind: 'founder', label: null };
+}
+
+// Session-level facts that ride on most records (branch, CLI version, cwd,
+// permission mode). Emitted only when a value changes, so the bus stays quiet.
+function captureMeta(record, ctx, emit) {
+  const next = {};
+  let changed = false;
+  for (const k of ['gitBranch', 'version', 'cwd', 'permissionMode']) {
+    if (record[k] != null && record[k] !== ctx.meta[k]) {
+      ctx.meta[k] = record[k];
+      next[k] = record[k];
+      changed = true;
+    }
+  }
+  if (changed) emit('meta', next);
 }
 
 function byteLen(s) {
@@ -140,6 +185,7 @@ function makeCtx(entry) {
     pendingInjected: [],
     currentTurn: null,
     lastCall: null,
+    meta: {},
   };
 }
 
@@ -188,7 +234,10 @@ function buildCall(record, toolNames, ctx) {
     agentLabel: ctx.agentLabel,
     model,
     speed,
+    effort: record.perTurnEffort || record.effort || null,
     turnId: ctx.currentTurn ? ctx.currentTurn.turnId : null,
+    turnSource: ctx.currentTurn ? ctx.currentTurn.source : null,
+    turnLabel: ctx.currentTurn ? ctx.currentTurn.label : null,
     input,
     cw5m,
     cw1h,
@@ -251,6 +300,7 @@ function processLine(line, ctx, emit) {
     return; // malformed line, skip
   }
   const type = record.type;
+  if (type === 'user' || type === 'assistant' || type === 'system') captureMeta(record, ctx, emit);
 
   if (type === 'assistant' && record.message) {
     // quotaLimits can ride on a synthetic (rejected) assistant message too --
@@ -290,7 +340,13 @@ function processLine(line, ctx, emit) {
 
   if (type === 'user') {
     const content = record.message && record.message.content;
-    if (record.isMeta === true) return; // internal hook stub, not a prompt/tool_result
+    if (record.isMeta === true) {
+      // Not a prompt: a skill body, an image attachment or another injected
+      // block. It still costs tokens on the next call, so attribute it there.
+      const src = classifySource(extractText(content), record);
+      ctx.pendingInjected.push({ type: src.kind, name: src.label, bytes: byteLen(content) });
+      return;
+    }
     // Founder ruling: a session whose last record is a user prompt or a
     // tool_result with no assistant usage after it has a call IN FLIGHT.
     // Mark activity for BOTH shapes; getOrCreateSession clears it on the
@@ -304,26 +360,42 @@ function processLine(line, ctx, emit) {
       return;
     }
     // Turn start.
-    if (ctx.currentTurn) {
-      ctx.currentTurn.sums = sumCalls(ctx.currentTurn.calls);
-      emit('turn', ctx.currentTurn);
-    }
+    if (ctx.currentTurn) finishTurn(ctx, emit);
     const text = extractText(content);
+    const src = classifySource(text, record);
     ctx.currentTurn = {
       turnId: record.uuid || ctx.sessionId + ':' + record.timestamp,
       ts: record.timestamp,
+      sessionId: ctx.sessionId,
+      agentId: ctx.agentId,
+      agentLabel: ctx.agentLabel,
       promptPreview: SHOW_PROMPTS ? text.slice(0, 140).replace(/\s+/g, ' ') : null,
       promptChars: text.length,
-      source: record.promptSource || (record.message && record.message.promptSource) || null,
+      source: src.kind,
+      label: src.label,
       calls: [],
       durationMs: null,
+      messageCount: null,
     };
     return;
   }
 
   if (type === 'attachment') {
     const a = record.attachment || {};
-    ctx.pendingInjected.push({ type: a.type, bytes: byteLen(line) });
+    // A hook's stdout is what actually lands in context; size that, not the
+    // whole record (which repeats it under `rendered`).
+    const payload = a.content != null ? a.content : a.stdout != null ? a.stdout : line;
+    ctx.pendingInjected.push({ type: a.type || 'attachment', name: a.hookName || null, bytes: byteLen(payload), ms: a.durationMs || 0 });
+    return;
+  }
+
+  if (type === 'queue-operation') {
+    // Something arrived while a turn was already running -- a founder message
+    // typed into a busy session, or a task notification. Never the text itself.
+    if (record.operation === 'enqueue') {
+      const src = classifySource(record.content || '', null);
+      emit('event', { ts: record.timestamp, sessionId: ctx.sessionId, kind: 'queued', detail: { source: src.kind, label: src.label, chars: (record.content || '').length } });
+    }
     return;
   }
 
@@ -333,6 +405,7 @@ function processLine(line, ctx, emit) {
     } else if (record.subtype === 'turn_duration') {
       if (ctx.currentTurn) {
         ctx.currentTurn.durationMs = record.durationMs;
+        ctx.currentTurn.messageCount = record.messageCount != null ? record.messageCount : null;
       }
     }
     return;
@@ -344,10 +417,18 @@ function processLine(line, ctx, emit) {
   }
 }
 
+function finishTurn(ctx, emit) {
+  const t = ctx.currentTurn;
+  t.sums = sumCalls(t.calls);
+  // The first call's fresh tokens are what THIS input (plus whatever rode in
+  // with it) cost to send; later calls in the turn are tool round-trips.
+  t.sums.inputFresh = t.calls.length ? t.calls[0].fresh : 0;
+  emit('turn', t);
+}
+
 function finalizeCtx(ctx, emit) {
   if (ctx.currentTurn) {
-    ctx.currentTurn.sums = sumCalls(ctx.currentTurn.calls);
-    emit('turn', ctx.currentTurn);
+    finishTurn(ctx, emit);
     ctx.currentTurn = null;
   }
 }
@@ -481,6 +562,15 @@ function getOrCreateSession(entry) {
       lastUserTs: null,
       lastCallTs: null,
       transcriptPath: entry.path || null,
+      // Per-session aggregates, kept incrementally so /api/state never rescans calls.
+      tools: {}, // name -> {uses, results, bytesIn}
+      injected: {}, // "type" or "type:name" -> {n, bytes, ms}
+      bySource: {}, // turn source kind -> {turns, calls, fresh, out}
+      compactions: 0,
+      gitBranch: null,
+      version: null,
+      cwd: null,
+      permissionMode: null,
     };
     state.sessionsMap.set(key, s);
   } else if (entry.path) {
@@ -496,6 +586,22 @@ function makeEmit(entry) {
       s.model = payload.model;
       s.calls.push(payload);
       s.lastCallTs = payload.ts;
+      for (const name of payload.tools) {
+        const t = s.tools[name] || (s.tools[name] = { uses: 0, results: 0, bytesIn: 0 });
+        t.uses++;
+      }
+      for (const f of payload.fedIn) {
+        const t = s.tools[f.tool] || (s.tools[f.tool] = { uses: 0, results: 0, bytesIn: 0 });
+        t.results++;
+        t.bytesIn += f.bytes;
+      }
+      for (const inj of payload.injected) {
+        const key = inj.name ? `${inj.type}:${inj.name}` : inj.type;
+        const a = s.injected[key] || (s.injected[key] = { type: inj.type, name: inj.name || null, n: 0, bytes: 0, ms: 0 });
+        a.n++;
+        a.bytes += inj.bytes;
+        a.ms += inj.ms || 0;
+      }
       state.dirty = true;
       bus.emit('sse', { type: 'call', data: payload });
     } else if (kind === 'user-activity') {
@@ -505,16 +611,52 @@ function makeEmit(entry) {
     } else if (kind === 'turn') {
       s.turns.push(payload);
       if (s.turns.length > 300) s.turns.shift();
+      const k = payload.source || 'founder';
+      const b = s.bySource[k] || (s.bySource[k] = { turns: 0, calls: 0, fresh: 0, out: 0, inputFresh: 0 });
+      b.turns++;
+      b.calls += payload.calls.length;
+      b.fresh += payload.sums.fresh;
+      b.out += payload.sums.out;
+      b.inputFresh += payload.sums.inputFresh || 0;
       state.dirty = true;
-      bus.emit('sse', { type: 'turn', data: payload });
+      bus.emit('sse', { type: 'turn', data: turnSummary(payload) });
+    } else if (kind === 'meta') {
+      Object.assign(s, payload);
+      state.dirty = true;
     } else if (kind === 'event') {
       const ev = { ts: payload.ts, sessionId: payload.sessionId, kind: payload.kind, detail: payload.detail };
+      if (ev.kind === 'compact') s.compactions++;
       state.events.push(ev);
       if (state.events.length > 500) state.events.shift();
       state.dirty = true;
       bus.emit('sse', { type: 'event', data: ev });
     }
   };
+}
+
+// A turn without its calls array (which can be large) -- what the feeds show.
+function turnSummary(t) {
+  return {
+    turnId: t.turnId, ts: t.ts, sessionId: t.sessionId, agentId: t.agentId, agentLabel: t.agentLabel,
+    source: t.source, label: t.label, promptPreview: t.promptPreview, promptChars: t.promptChars,
+    calls: t.calls.length, durationMs: t.durationMs, messageCount: t.messageCount, sums: t.sums,
+    model: t.calls.length ? t.calls[t.calls.length - 1].model : null,
+  };
+}
+
+function topEntries(obj, by, n) {
+  return Object.entries(obj).map(([k, v]) => Object.assign({ key: k }, v)).sort((a, b) => b[by] - a[by]).slice(0, n);
+}
+
+function mergeAgg(into, from) {
+  for (const [k, v] of Object.entries(from)) {
+    const t = into[k] || (into[k] = {});
+    for (const [f, n] of Object.entries(v)) {
+      if (typeof n === 'number') t[f] = (t[f] || 0) + n;
+      else if (t[f] == null) t[f] = n;
+    }
+  }
+  return into;
 }
 
 function parseFileFull(entry) {
@@ -625,6 +767,15 @@ function sessionSummary(s) {
     lastActive: last ? last.ts : null,
     inFlightSince: inFlightSince(s),
     warnings: s.lastWarnings || [],
+    turns: s.turns.length,
+    compactions: s.compactions,
+    gitBranch: s.gitBranch,
+    version: s.version,
+    cwd: s.cwd,
+    permissionMode: s.permissionMode,
+    bySource: s.bySource,
+    tools: topEntries(s.tools, 'bytesIn', 12),
+    injected: topEntries(s.injected, 'bytes', 20),
   };
 }
 
@@ -1088,14 +1239,27 @@ function startServer(port, hours) {
       const sessions = [...state.sessionsMap.values()].map(sessionSummary);
       const calls = allCallsSorted(500);
       const turns = [];
-      for (const s of state.sessionsMap.values()) turns.push(...s.turns.slice(-50));
+      const bySource = {};
+      const injected = {};
+      const tools = {};
+      for (const s of state.sessionsMap.values()) {
+        turns.push(...s.turns.slice(-50).map(turnSummary));
+        mergeAgg(bySource, s.bySource);
+        mergeAgg(injected, s.injected);
+        mergeAgg(tools, s.tools);
+      }
+      turns.sort((a, b) => new Date(a.ts) - new Date(b.ts));
       const live = [...liveCalls.values()].filter((lc) => lc.status !== 'done');
       const body = JSON.stringify({
         sessions,
         calls,
-        turns,
+        turns: turns.slice(-200),
         events: state.events.slice(-200),
         live,
+        bySource,
+        injected: topEntries(injected, 'bytes', 40),
+        tools: topEntries(tools, 'bytesIn', 20),
+        showPrompts: SHOW_PROMPTS,
       });
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(body);
@@ -1111,7 +1275,7 @@ function startServer(port, hours) {
       }
       const live = s.liveCalls ? [...s.liveCalls.values()] : [];
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ summary: sessionSummary(s), calls: s.calls, turns: s.turns, live }));
+      res.end(JSON.stringify({ summary: sessionSummary(s), calls: s.calls, turns: s.turns.map((t) => Object.assign(turnSummary(t), { callList: t.calls })), live }));
       return;
     }
     if (url.pathname === '/events') {
@@ -1357,7 +1521,7 @@ async function runSelftest() {
   });
 
   // 11. stripSlugPrefix strips the REAL homedir prefix (deliverable 5), not a
-  // literal -Users-tj-; a slug from an unrelated machine/homedir is untouched.
+  // hardcoded literal; a slug from an unrelated machine/homedir is untouched.
   test('stripSlugPrefix derives its prefix from os.homedir(), not a literal', () => {
     const homeSlug = os.homedir().replace(/[\\/]/g, '-');
     assert(stripSlugPrefix(homeSlug + '-myproject') === 'myproject', 'expected homedir prefix stripped');
@@ -1446,6 +1610,73 @@ async function runSelftest() {
     }
   });
 
+  // 17. Input-source classification: the founder's own words vs everything the
+  //     system feeds in as a "user" record. isMeta alone cannot separate these.
+  test('classifySource: founder vs task/slash/local/compaction/cron/interrupt/skill/image', () => {
+    const c = (t, r) => classifySource(t, r || null);
+    assert(c('please fix the build').kind === 'founder', 'plain text is the founder');
+    const task = c('<task-notification>\n<task-id>abc123</task-id>\n<status>completed</status>');
+    assert(task.kind === 'task' && task.label === 'abc123', `task-notification -> task/abc123, got ${JSON.stringify(task)}`);
+    const slash = c('<command-message>compact</command-message>\n<command-name>/compact</command-name>');
+    assert(slash.kind === 'slash' && slash.label === '/compact', `command expansion -> slash//compact, got ${JSON.stringify(slash)}`);
+    assert(c('/model fable').kind === 'slash', 'a raw typed /command is slash');
+    assert(c('<local-command-stdout>Compacted</local-command-stdout>').kind === 'local', 'local command output');
+    assert(c('This session is being continued from a previous conversation that ran out of context.').kind === 'compaction', 'compaction summary');
+    assert(c('Scheduled wakeup (founder asked for one)').kind === 'cron', 'cron wakeup');
+    assert(c('[Request interrupted by user for tool use]').kind === 'interrupt', 'interrupt');
+    const skill = c('Base directory for this skill: /home/x/.claude/skills/compact-prep\n\n# Compact Prep', { isMeta: true });
+    assert(skill.kind === 'skill' && skill.label === 'compact-prep', `skill body -> skill/compact-prep, got ${JSON.stringify(skill)}`);
+    assert(c('[Image: original 390x2400]', { isMeta: true }).kind === 'image', 'image attachment');
+    assert(c('anything else', { isMeta: true }).kind === 'meta', 'other isMeta is meta');
+  });
+
+  // 18. A turn carries its source + label, the call carries the turn's source,
+  //     and the session aggregates fresh tokens by source.
+  test('turn source/label flow to calls and to the per-session bySource aggregate', () => {
+    const entry = { project: 'p', sessionId: 's-src', agentId: null, agentLabel: null };
+    const ctx = makeCtx(entry);
+    const out = { turns: [], calls: [] };
+    const emit = (k, p) => { if (k === 'turn') out.turns.push(p); if (k === 'call') out.calls.push(p); };
+    const usage = { input_tokens: 5, cache_creation_input_tokens: 100, cache_read_input_tokens: 0, output_tokens: 7, speed: 'standard' };
+    processLine(JSON.stringify({ type: 'user', uuid: 'u1', timestamp: 't1', message: { role: 'user', content: '<task-notification>\n<task-id>job9</task-id>' } }), ctx, emit);
+    processLine(JSON.stringify({ type: 'assistant', requestId: 'r1', timestamp: 't2', perTurnEffort: 'high', message: { id: 'm1', model: 'claude-sonnet-5', usage, content: [] } }), ctx, emit);
+    processLine(JSON.stringify({ type: 'system', subtype: 'turn_duration', durationMs: 4200, messageCount: 3, timestamp: 't3' }), ctx, emit);
+    processLine(JSON.stringify({ type: 'user', uuid: 'u2', timestamp: 't4', message: { role: 'user', content: 'thanks' } }), ctx, emit);
+    assert(out.calls[0].turnSource === 'task' && out.calls[0].turnLabel === 'job9', `call should carry turn source, got ${out.calls[0].turnSource}/${out.calls[0].turnLabel}`);
+    assert(out.calls[0].effort === 'high', 'call should carry perTurnEffort');
+    assert(out.turns.length === 1 && out.turns[0].source === 'task', 'first turn flushed with source task');
+    assert(out.turns[0].durationMs === 4200 && out.turns[0].messageCount === 3, 'turn_duration attaches duration + messageCount');
+    assert(out.turns[0].sums.inputFresh === 105, `inputFresh = first call fresh (105), got ${out.turns[0].sums.inputFresh}`);
+    // aggregate through the real emitter
+    const s = getOrCreateSession({ sessionId: 's-src-agg', agentId: null, project: 'p', agentLabel: null, path: null });
+    const realEmit = makeEmit({ sessionId: 's-src-agg', agentId: null, project: 'p', agentLabel: null, path: null });
+    realEmit('turn', out.turns[0]);
+    assert(s.bySource.task && s.bySource.task.turns === 1 && s.bySource.task.fresh === 105, `bySource.task should be {turns:1, fresh:105}, got ${JSON.stringify(s.bySource)}`);
+  });
+
+  // 19. Hook output is attributed by hook name with its real payload size, and
+  //     a queued message becomes an event without carrying its text.
+  test('hook attachments aggregate by name; queue-operation -> queued event without text', () => {
+    const entry = { sessionId: 's-hook', agentId: null, project: 'p', agentLabel: null, path: null };
+    const s = getOrCreateSession(entry);
+    const emit = makeEmit(entry);
+    const ctx = makeCtx(entry);
+    const events = [];
+    const wrap = (k, p) => { if (k === 'event') events.push(p); emit(k, p); };
+    const usage = { input_tokens: 1, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, output_tokens: 1, speed: 'standard' };
+    processLine(JSON.stringify({ type: 'attachment', attachment: { type: 'hook_success', hookName: 'SessionStart:startup', content: 'x'.repeat(400), durationMs: 30 } }), ctx, wrap);
+    processLine(JSON.stringify({ type: 'attachment', attachment: { type: 'hook_success', hookName: 'SessionStart:startup', content: 'y'.repeat(200), durationMs: 10 } }), ctx, wrap);
+    processLine(JSON.stringify({ type: 'attachment', attachment: { type: 'total_tokens_reminder', content: 'z'.repeat(50) } }), ctx, wrap);
+    processLine(JSON.stringify({ type: 'queue-operation', operation: 'enqueue', timestamp: 't0', content: 'secret text typed while busy' }), ctx, wrap);
+    processLine(JSON.stringify({ type: 'assistant', requestId: 'r', timestamp: 't', message: { id: 'mh', model: 'claude-sonnet-5', usage, content: [] } }), ctx, wrap);
+    const hook = s.injected['hook_success:SessionStart:startup'];
+    assert(hook && hook.n === 2 && hook.bytes === 600 && hook.ms === 40, `expected hook agg {n:2, bytes:600, ms:40}, got ${JSON.stringify(hook)}`);
+    assert(s.injected['total_tokens_reminder'].bytes === 50, 'un-named attachment aggregates by type');
+    const q = events.find((e) => e.kind === 'queued');
+    assert(q && q.detail.source === 'founder' && q.detail.chars === 28, `queued event with source+chars, got ${JSON.stringify(q)}`);
+    assert(!JSON.stringify(q).includes('secret'), 'queued event must not carry the message text');
+  });
+
   console.log(failures === 0 ? `ALL ${total} SELFTESTS PASSED` : `${failures} SELFTEST(S) FAILED`);
   process.exit(failures === 0 ? 0 : 1);
 }
@@ -1520,4 +1751,4 @@ function main() {
 
 if (require.main === module) main();
 
-module.exports = { priceFor, processLine, makeCtx, feedChunk, makeTailBuffer, discoverFiles, sumCalls, stripSlugPrefix, CONFIG_DIR, METER_DIR, LIVE_FILE, PROJECTS_DIR, mapLimit };
+module.exports = { priceFor, processLine, makeCtx, feedChunk, makeTailBuffer, discoverFiles, sumCalls, stripSlugPrefix, classifySource, CONFIG_DIR, METER_DIR, LIVE_FILE, PROJECTS_DIR, mapLimit };

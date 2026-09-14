@@ -131,8 +131,8 @@ Format: who they are → what they do → what breaks → evidence (file:line or
   and keeps serving on any per-request exception.
 
 ### 1.13 The tool's own credibility
-- `stripSlugPrefix` hardcodes `/^-Users-tj-/` (meter.cjs:78-81). Every other user sees full slugs
-  and an obvious "built for one machine" smell.
+- `stripSlugPrefix` hardcodes the developer's own home-directory slug (meter.cjs:78-81). Every
+  other user sees full slugs and an obvious "built for one machine" smell.
 - Statusline's first-seen session starts counting at the current offset (statusline.cjs:84-96),
   so "session: X in" understates until restart.
 - Errors collapse to `token-meter: n/a` with no log (statusline.cjs:163-198).
@@ -157,7 +157,7 @@ Format: who they are → what they do → what breaks → evidence (file:line or
 | 9 | **Scale.** Parse concurrency cap (32); evict sessions outside `--hours`; rotate `live.jsonl` while running; Linux watch fallback with a printed notice. | Start against 5,270 files with `ulimit -n 256` → no EMFILE; 24h soak, RSS flat. |
 | 10 | **`--doctor`.** Prints: CLI version, install type, node version, config dir, projects dir + file count, persistence on/off, auth mode, existing base URL, managed-settings override, statusLine present, proxy reachable, watch mode. | Run on this machine and on a clean VM; every line either green or a sentence saying what to do. |
 | 11 | **Statusline correctness.** Chain an existing status line (`--chain "<old command>"`), bounded backfill, "since HH:MM" label, rotating log. | Existing command still renders; totals equal the dashboard after backfill. |
-| 12 | **Scrub.** Remove `-Users-tj-`, session ids and project names from code, BUILD-REPORT and screenshots; regenerate screenshots from a fixture. | `grep -r "tj\|850da9a8\|AI Bible"` → 0 hits. |
+| 12 | **Scrub.** Remove the developer's home-directory prefix, session ids and project names from code, BUILD-REPORT and screenshots; regenerate screenshots from a fixture. | grep the tracked tree for the real username/session-id/project-name literals -> 0 hits. |
 
 ### P1 — before calling it 1.0
 - Fixture corpus of transcripts across CLI versions; CI matrix macOS/Linux/Windows × Node 18/20/22.

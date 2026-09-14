@@ -106,7 +106,7 @@ never modified the real files:
 | 8b | stale in-flight not flagged | unbounded variant (no age/mtime check) | `expected a 3-hour-old pending record to NOT read as in-flight` |
 | 9 | cw5m recovery | trust-the-split variant (the real bug, see §4) | `expected cw5m recovered as 6903-5070=1833, got 0` |
 
-### 3.2 Reconcile — transcript `850da9a8-9361-441a-856e-99dd6e537d0b.jsonl` (final)
+### 3.2 Reconcile — a real multi-agent transcript (final)
 
 Independent `python3` sum (own dedupe, own field extraction, never imports meter.cjs)
 vs. `node meter.cjs --json --since 1970-01-01 --file <transcript>`, summed per model:

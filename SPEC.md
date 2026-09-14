@@ -41,7 +41,7 @@ real time token consumption viewer."*
 
 1. **Transcripts:** `~/.claude/projects/<project-slug>/<sessionId>.jsonl`. **Subagents:**
    `<project-slug>/<sessionId>/subagents/agent-<id>.jsonl`, plus `agent-<id>.meta.json`
-   `{agentType, description, model}`. The project name is the slug with the `-Users-tj-` prefix stripped.
+   `{agentType, description, model}`. The project name is the slug with the homedir prefix stripped.
    The lead transcript is **224 MB**, so stream it line by line. Never read a transcript into one string.
 2. **One API call** is a record with `type:"assistant"` and `message.usage`, where `message.model !== "<synthetic>"`.
    - **One response is written as SEVERAL lines**, one per content block (thinking / text / tool_use). They share
@@ -206,7 +206,7 @@ design light and dark separately (`prefers-color-scheme`), add hover tooltips an
    - `fedIn` mapped by tool_use_id;
    - a tool_result user record does NOT start a turn;
    - a partial trailing line is buffered, not dropped.
-2. **Reconcile:** for transcript `-Users-tj-Claude-CLI-AI-Bible/850da9a8-9361-441a-856e-99dd6e537d0b.jsonl`, compare the
+2. **Reconcile:** for a real, large multi-agent transcript, compare the
    meter's per-model token sums with an independent `python3` sum using the same dedupe. They must be equal.
 3. **Live:** start `--serve`, hit `/api/state` with curl, and run `curl -N /events` for 60 s. At least one real call
    from an active session must arrive within 2 s of its line appearing in the transcript.
