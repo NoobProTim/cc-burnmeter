@@ -18,6 +18,7 @@ const readline = require('readline');
 const { EventEmitter } = require('events');
 
 const HOME = os.homedir();
+const VERSION = (() => { try { return require('./package.json').version; } catch (e) { return '0.0.0'; } })();
 // CLAUDE_CONFIG_DIR relocates the whole ~/.claude tree -- honour it the same
 // way Claude Code itself does, and the same way proxy.cjs does (deliverable 5).
 const CONFIG_DIR = process.env.CLAUDE_CONFIG_DIR || path.join(HOME, '.claude');
@@ -1218,6 +1219,14 @@ function startServer(port, hours) {
       res.end(JSON.stringify({ error: 'forbidden host' }));
       return;
     }
+    // Ownership handshake, deliberately unauthenticated: the SessionStart hook and
+    // `cli url` use it to tell OUR dashboard from another program on the port,
+    // and to notice a stale process after a plugin update. Reveals no data.
+    if (url.pathname === '/api/hello') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ name: 'cc-burnmeter', version: VERSION, pid: process.pid }));
+      return;
+    }
     if ((url.pathname.startsWith('/api/') || url.pathname === '/events') && !checkAuth(req, url, token)) {
       res.writeHead(401, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: 'unauthorized' }));
@@ -1302,7 +1311,11 @@ function startServer(port, hours) {
     process.exit(1);
   });
   server.listen(port, '127.0.0.1', () => {
-    console.error(`token-meter dashboard: http://127.0.0.1:${server.address().port}/?token=${token}`);
+    // The token goes to a terminal, never to a log file: when stderr is not a
+    // TTY (the SessionStart hook, launchd, systemd) print the URL without it.
+    const p = server.address().port;
+    if (process.stderr.isTTY || process.env.TOKEN_METER_PRINT_TOKEN === '1') console.error(`token-meter dashboard: http://127.0.0.1:${p}/?token=${token}`);
+    else console.error(`token-meter dashboard: http://127.0.0.1:${p}/ (run \`cc-burnmeter url\` for the link with its token)`);
   });
   return server;
 }
@@ -1677,6 +1690,37 @@ async function runSelftest() {
     assert(!JSON.stringify(q).includes('secret'), 'queued event must not carry the message text');
   });
 
+  // 20. The three manifests carry ONE version (plugin pre-mortem §2.11).
+  test('package.json, plugin.json and marketplace.json agree on the version', () => {
+    const v = (f) => JSON.parse(fs.readFileSync(path.join(__dirname, f), 'utf8'));
+    const pkg = v('package.json').version, plug = v('.claude-plugin/plugin.json').version, mk = v('.claude-plugin/marketplace.json');
+    const mkv = mk.plugins && mk.plugins[0] && mk.plugins[0].version;
+    assert(pkg && pkg === plug && pkg === mkv, `versions differ: package ${pkg}, plugin ${plug}, marketplace ${mkv}`);
+  });
+
+  // 21. /api/hello answers WITHOUT a token and identifies the server; the banner
+  //     printed to a non-TTY stderr carries no token (pre-mortem §2.2, §2.4).
+  await testAsync('/api/hello is unauthenticated and names the server; non-TTY banner has no token', async () => {
+    const { server, port, token } = await spawnTestServer();
+    try {
+      const res = await new Promise((resolve, reject) => {
+        http.get({ host: '127.0.0.1', port, path: '/api/hello' }, (r) => { let b = ''; r.on('data', (d) => { b += d; }); r.on('end', () => resolve({ status: r.statusCode, body: JSON.parse(b) })); }).on('error', reject);
+      });
+      assert(res.status === 200 && res.body.name === 'cc-burnmeter' && res.body.version === VERSION && res.body.pid > 0, `unexpected hello: ${JSON.stringify(res)}`);
+      void token;
+    } finally {
+      server.kill();
+    }
+    // banner without TOKEN_METER_PRINT_TOKEN, stderr piped (not a TTY)
+    const { spawn } = require('child_process');
+    const tmp = fs.mkdtempSync(require('os').tmpdir() + '/token-meter-selftest-banner-');
+    const child = spawn(process.execPath, [require.resolve('./meter.cjs'), '--serve', '0'], { env: Object.assign({}, process.env, { CLAUDE_CONFIG_DIR: tmp, TOKEN_METER_LIVE_FILE: '', TOKEN_METER_PROJECTS_DIR: path.join(tmp, 'projects'), TOKEN_METER_PRINT_TOKEN: '' }), stdio: ['ignore', 'ignore', 'pipe'] });
+    const banner = await new Promise((resolve) => { let buf = ''; child.stderr.on('data', (c) => { buf += c; if (/dashboard:/.test(buf)) resolve(buf); }); setTimeout(() => resolve(buf), 4000); });
+    child.kill();
+    fs.rmSync(tmp, { recursive: true, force: true });
+    assert(/dashboard: http:\/\/127\.0\.0\.1:\d+\//.test(banner) && !/token=/.test(banner), `non-TTY banner must not carry the token, got: ${banner.trim()}`);
+  });
+
   console.log(failures === 0 ? `ALL ${total} SELFTESTS PASSED` : `${failures} SELFTEST(S) FAILED`);
   process.exit(failures === 0 ? 0 : 1);
 }
@@ -1688,7 +1732,7 @@ function spawnTestServer() {
   const { spawn } = require('child_process');
   const tmp = fs.mkdtempSync(require('os').tmpdir() + '/token-meter-selftest-auth-');
   const child = spawn(process.execPath, [require.resolve('./meter.cjs'), '--serve', '0'], {
-    env: Object.assign({}, process.env, { CLAUDE_CONFIG_DIR: tmp, TOKEN_METER_LIVE_FILE: '', TOKEN_METER_PROJECTS_DIR: path.join(tmp, 'projects') }),
+    env: Object.assign({}, process.env, { CLAUDE_CONFIG_DIR: tmp, TOKEN_METER_LIVE_FILE: '', TOKEN_METER_PROJECTS_DIR: path.join(tmp, 'projects'), TOKEN_METER_PRINT_TOKEN: '1' }),
     stdio: ['ignore', 'ignore', 'pipe'],
   });
   child.once('exit', () => fs.rmSync(tmp, { recursive: true, force: true }));
@@ -1729,7 +1773,8 @@ function opt(args, name, def) {
 
 function main() {
   const args = process.argv.slice(2);
-  if (args.includes('--show-prompts')) SHOW_PROMPTS = true;
+  // The plugin hook starts the server with no flags; the env var is the only way through it.
+  if (args.includes('--show-prompts') || process.env.CC_BURNMETER_SHOW_PROMPTS === '1') SHOW_PROMPTS = true;
   if (args.includes('--selftest')) return runSelftest();
   if (args.includes('--json')) {
     const since = opt(args, '--since', '2h');

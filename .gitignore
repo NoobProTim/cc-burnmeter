@@ -10,3 +10,5 @@ node_modules/
 
 # founder marketing material (LinkedIn carousel + post); not part of the shipped tool
 marketing/
+token
+notice-*

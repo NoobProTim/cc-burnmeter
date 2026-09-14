@@ -19,7 +19,7 @@ function main() {
     // Each file owns its own proof; run all four in sequence rather than
     // inventing a combined test runner.
     let failed = false;
-    for (const file of ['meter.cjs', 'proxy.cjs', 'statusline.cjs', 'wire.cjs']) {
+    for (const file of ['meter.cjs', 'proxy.cjs', 'statusline.cjs', 'wire.cjs', 'scripts/ensure-dashboard.cjs']) {
       if (run(file, ['--selftest']) !== 0) failed = true;
     }
     process.exit(failed ? 1 : 0);
@@ -34,22 +34,34 @@ function main() {
 
   // `url` prints the dashboard address with its bearer token (the page 401s on
   // every fetch without it); `open` also launches the browser. Used by the skill.
-  if (cmd === 'url' || cmd === 'open') {
+  if (cmd === 'url' || cmd === 'open' || cmd === 'stop') {
     const fs = require('fs');
     const { METER_DIR } = require('./meter.cjs');
-    const port = process.env.CC_BURNMETER_PORT || rest[0] || '4777';
-    let token = '';
-    try { token = fs.readFileSync(path.join(METER_DIR, 'token'), 'utf8').trim(); } catch (e) { /* not started yet */ }
-    const url = `http://127.0.0.1:${port}/${token ? '?token=' + token : ''}`;
-    console.log(url + (token ? '' : '   (no token yet: start the dashboard once with `cc-burnmeter serve`)'));
-    if (cmd === 'open' && token) {
-      const opener = process.platform === 'darwin' ? 'open' : process.platform === 'win32' ? 'start' : 'xdg-open';
-      spawnSync(opener, [url], { stdio: 'ignore', shell: process.platform === 'win32' });
-    }
-    process.exit(0);
+    const { hello, decide } = require('./scripts/ensure-dashboard.cjs');
+    const port = Number(process.env.CC_BURNMETER_PORT || rest[0] || 4777);
+    hello(port).then((h) => {
+      const state = decide(h, require('./package.json').version);
+      if (cmd === 'stop') {
+        if (state === 'start') { console.log(`nothing listening on ${port}`); process.exit(0); }
+        if (state === 'foreign') { console.error(`port ${port} is another program, not cc-burnmeter -- not touching it`); process.exit(1); }
+        try { process.kill(h.body.pid); console.log(`stopped cc-burnmeter dashboard (pid ${h.body.pid}) on ${port}`); process.exit(0); } catch (e) { console.error(`could not stop pid ${h.body.pid}: ${e.message}`); process.exit(1); }
+      }
+      // Never hand the token to a page that is not ours (plugin pre-mortem §2.2).
+      if (state === 'foreign') { console.error(`port ${port} is used by another program, not cc-burnmeter -- set CC_BURNMETER_PORT and start the dashboard`); process.exit(1); }
+      let token = '';
+      try { token = fs.readFileSync(path.join(METER_DIR, 'token'), 'utf8').trim(); } catch (e) { /* not started yet */ }
+      const url = `http://127.0.0.1:${port}/${token ? '?token=' + token : ''}`;
+      console.log(url + (state === 'start' ? '   (dashboard not running: `cc-burnmeter serve` or open a new session)' : token ? '' : '   (no token yet)'));
+      if (cmd === 'open' && token && state !== 'start') {
+        const opener = process.platform === 'darwin' ? 'open' : process.platform === 'win32' ? 'start' : 'xdg-open';
+        spawnSync(opener, [url], { stdio: 'ignore', shell: process.platform === 'win32' });
+      }
+      process.exit(0);
+    });
+    return;
   }
 
-  console.error('usage: cc-burnmeter <serve|proxy|statusline|wire|unwire|doctor|url|open|selftest> [...args]');
+  console.error('usage: cc-burnmeter <serve|proxy|statusline|wire|unwire|doctor|url|open|stop|selftest> [...args]');
   process.exit(1);
 }
 

@@ -2,6 +2,11 @@
 
 ## 0.2.0 — 2026-09-14
 
+- Plugin pre-mortem fixes: SessionStart hook rewritten in Node (no `sh`/`curl`, same on Windows);
+  `/api/hello` ownership handshake so the hook and `url` never trust another program on the port;
+  stale server restarted after a plugin update; "port taken" notice printed once; the access token is
+  never written to a log; `CC_BURNMETER_AUTOSTART=0`, `CC_BURNMETER_PORT`, `CC_BURNMETER_SHOW_PROMPTS`;
+  `cc-burnmeter stop`; version-match test across the three manifests; valid marketplace manifest.
 - Dashboard rebuilt: dark HUD design, section rail, five stat tiles including "fresh tokens you caused".
 - Input-source attribution: every turn and call is tagged with what started it (you, task
   notification, slash command, cron wakeup, compaction summary, local command output, interrupt).

@@ -22,9 +22,15 @@ and cloud sessions never touch local disk and are not seen. Nothing leaves the m
 /token-meter
 ```
 
-The plugin's SessionStart hook starts the dashboard on port 4777 if nothing answers there, and
-`/token-meter` prints the URL with its access token. Requires Node 18+ on your PATH (the native
-Claude Code installer does not add one; install Node or wait for the binary release).
+The plugin's SessionStart hook starts the dashboard on port 4777 at your next session if nothing
+answers there (a resident local process; it survives Claude Code exiting), and `/token-meter`
+prints the URL with its access token. Requires Node 18+ on your PATH (the native Claude Code
+installer does not add one; install Node or wait for the binary release).
+
+- **Don't want auto-start?** `export CC_BURNMETER_AUTOSTART=0` and start it yourself with `npx cc-burnmeter serve`.
+- **CI / headless:** SessionStart hooks also fire under `claude -p`; set `CC_BURNMETER_AUTOSTART=0` on runners.
+- **Port taken?** The hook checks the server is really ours (`/api/hello`); if another program owns 4777 it says so once and stops. Set `CC_BURNMETER_PORT`.
+- **See your own prompt text?** `CC_BURNMETER_SHOW_PROMPTS=1` (not on a shared machine).
 
 **With npm**
 
@@ -80,13 +86,14 @@ Your own prompt text is never shown unless the server runs with `--show-prompts`
 node meter.cjs                 # terminal view
 node meter.cjs --serve 4777    # dashboard
 node meter.cjs --json --since 2h
-npm test                       # meter, proxy, statusline and wire self-tests (fake upstream only)
+npm test                       # meter, proxy, statusline, wire and hook self-tests (fake upstream only)
 ```
 
 ## Uninstall
 
-`npx cc-burnmeter unwire` (restores settings), `/plugin uninstall cc-burnmeter`, and delete
-`~/.claude/token-meter/` if you want the token and logs gone.
+In this order: `npx cc-burnmeter unwire` (restores settings, so no dangling status line),
+`npx cc-burnmeter stop` (kills the dashboard it verified is ours), `/plugin uninstall cc-burnmeter`,
+and delete `~/.claude/token-meter/` if you want the token and logs gone.
 
 ## Security
 

@@ -20,10 +20,14 @@ token in the URL, so always get the URL from the CLI rather than typing it.
 | Add the status line (backs up settings, merges, never replaces) | `node "${CLAUDE_PLUGIN_ROOT}/cli.cjs" wire` |
 | Opt in to the proxy tier (prints the feature-loss table first) | `node "${CLAUDE_PLUGIN_ROOT}/cli.cjs" wire --proxy` |
 | Undo everything wire did (byte-identical restore) | `node "${CLAUDE_PLUGIN_ROOT}/cli.cjs" unwire` |
+| Stop the dashboard (only if it is ours) | `node "${CLAUDE_PLUGIN_ROOT}/cli.cjs" stop` |
 | Dump normalized calls as JSONL | `node "${CLAUDE_PLUGIN_ROOT}/meter.cjs" --json --since 2h` |
 
-The dashboard itself is started by this plugin's SessionStart hook if nothing answers on port 4777.
-If `url` reports no token, run `node "${CLAUDE_PLUGIN_ROOT}/cli.cjs" serve 4777` once in the background.
+The dashboard itself is started by this plugin's SessionStart hook if nothing answers on port 4777
+(disable with `CC_BURNMETER_AUTOSTART=0`; change the port with `CC_BURNMETER_PORT`). If `url` says the
+dashboard is not running, start it once in the background: `node "${CLAUDE_PLUGIN_ROOT}/cli.cjs" serve 4777`.
+If `${CLAUDE_PLUGIN_ROOT}` is not expanded in your shell, the `token-meter` shim on the Bash tool's PATH
+takes the same subcommands (`token-meter url`, `token-meter stop`), and so does `npx cc-burnmeter`.
 
 ## How to answer questions with it
 
