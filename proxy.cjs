@@ -226,18 +226,16 @@ function computeWarnings(betaHeader, model, breakdown) {
   if (!hasToolSearch && (tools.length > 60 || (breakdown && breakdown.toolsTotal > 250_000))) {
     warnings.push('tool-search-off');
   }
-  // ponytail: "context-1m substring in anthropic-beta" is an unverified
-  // assumption (never confirmed against real 1M-window traffic) -- upgrade
-  // by capturing a real [1m]-model request and checking the beta string.
-  if (model && /sonnet-5|opus-5|fable/.test(model) && !betaHeader.includes('context-1m')) {
-    warnings.push('context-200k');
-  }
+  // NOTE: there is deliberately NO "200K window" detector here. Behind a custom
+  // base URL Claude Code budgets a 1M model at 200K, but that budget is LOCAL to
+  // Claude Code -- nothing in the request reveals it (native-1M models send no
+  // context-1m beta at all). Detecting it from headers fired on every healthy
+  // request. The settings check in `wire doctor` is the right place.
   return warnings;
 }
 
 const WARNING_REMEDY = {
   'tool-search-off': 'tool search is OFF (full tool schemas sent every call) -- set env ENABLE_TOOL_SEARCH=true',
-  'context-200k': 'this model is budgeted at 200K, not its 1M window -- start with a [1m] model, e.g. claude --model sonnet[1m]',
 };
 
 function startProxy({ port = PORT, upstream = UPSTREAM, liveFile = LIVE_FILE } = {}) {
@@ -938,8 +936,8 @@ async function runSelftest() {
     }
   });
 
-  // ---- Check 11: context-200k rule (beta may repeat as string[]; normalized before the substring test) ----
-  await test('11. context-200k: fires for a 1M-eligible model without context-1m beta, not with it', async () => {
+  // ---- Check 11: no header-based "200K window" warning (it fired on every healthy 1M request) ----
+  await test('11. a native-1M model with no context-1m beta produces NO warning', async () => {
     const fake = http.createServer((req, res) => {
       res.writeHead(200, { 'content-type': 'application/json' });
       res.end('{}');
@@ -948,32 +946,16 @@ async function runSelftest() {
     const fakePort = fake.address().port;
     const { port, close } = await startProxy({ port: 0, upstream: `http://127.0.0.1:${fakePort}`, liveFile });
     try {
-      function post(body, headers) {
-        return new Promise((resolve, reject) => {
-          const r = http.request(
-            { host: '127.0.0.1', port, path: '/v1/messages', method: 'POST', headers: Object.assign({ 'content-type': 'application/json' }, headers) },
-            (res) => {
-              res.resume();
-              res.on('end', resolve);
-            }
-          );
-          r.on('error', reject);
-          r.end(body);
-        });
-      }
-      const body = JSON.stringify({ model: 'claude-sonnet-5', messages: [] });
-      await post(body, { 'x-claude-code-session-id': 'sess-200k' });
-      await post(body, { 'x-claude-code-session-id': 'sess-1m', 'anthropic-beta': 'context-1m-2025-08-07' });
-      const lines = fs
-        .readFileSync(liveFile, 'utf8')
-        .trim()
-        .split('\n')
-        .map((l) => JSON.parse(l));
-      const s200k = lines.find((l) => l.type === 'req-start' && l.sessionId === 'sess-200k');
-      const s1m = lines.find((l) => l.type === 'req-start' && l.sessionId === 'sess-1m');
-      assert(s200k.warnings.includes('context-200k'), 'expected context-200k without context-1m beta');
-      assert(!s1m.warnings.includes('context-200k'), 'expected no context-200k when beta includes context-1m');
-      assert(s1m.beta === 'context-1m-2025-08-07', 'expected beta header captured on the record');
+      await new Promise((resolve, reject) => {
+        const r = http.request(
+          { host: '127.0.0.1', port, path: '/v1/messages', method: 'POST', headers: { 'content-type': 'application/json', 'x-claude-code-session-id': 'sess-native-1m' } },
+          (res) => { res.resume(); res.on('end', resolve); }
+        );
+        r.on('error', reject);
+        r.end(JSON.stringify({ model: 'claude-fable-5-1', messages: [] }));
+      });
+      const rec = fs.readFileSync(liveFile, 'utf8').trim().split('\n').map((l) => JSON.parse(l)).find((l) => l.type === 'req-start' && l.sessionId === 'sess-native-1m');
+      assert(rec && !rec.warnings.some((w) => /200k/i.test(w)), `expected no 200K warning, got ${JSON.stringify(rec && rec.warnings)}`);
     } finally {
       await close();
       await new Promise((r) => fake.close(r));

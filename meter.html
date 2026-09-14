@@ -307,7 +307,7 @@ function renderHeader() {
   const proxy = STATE.live.size || STATE.calls.some((c) => c.sentBreakdown);
   $('scope').textContent = 'window: server --hours · ' + (proxy ? 'proxy + transcript tiers' : 'transcript tier');
   const flagged = STATE.sessions.filter((s) => s.warnings && s.warnings.length);
-  const W = { 'tool-search-off': 'tool search OFF — full schemas every call', 'context-200k': '200K window assumed for a 1M model' };
+  const W = { 'tool-search-off': 'tool search OFF — full schemas every call' };
   $('warnBanner').hidden = !flagged.length;
   if (flagged.length) { const set = new Set(); flagged.forEach((s) => s.warnings.forEach((w) => set.add(W[w] || w))); $('warnBanner').textContent = '⚠ ' + [...set].join(' · ') + ' — ' + flagged.length + ' session' + (flagged.length > 1 ? 's' : ''); }
 }

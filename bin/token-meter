@@ -1,0 +1,3 @@
+#!/bin/sh
+# Bash-tool shim: `token-meter <cmd>` inside Claude Code == `npx cc-burnmeter <cmd>`.
+exec node "$(dirname "$0")/../cli.cjs" "$@"

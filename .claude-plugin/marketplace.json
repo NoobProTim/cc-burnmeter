@@ -1,0 +1,12 @@
+{
+  "owner": "NoobProTim",
+  "plugins": [
+    {
+      "name": "cc-burnmeter",
+      "displayName": "CC-Burnmeter",
+      "description": "Real-time token meter for Claude Code. Transcript tier by default; an opt-in local proxy for exact wire bytes.",
+      "version": "0.2.0",
+      "source": { "type": "path", "path": "./" }
+    }
+  ]
+}

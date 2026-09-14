@@ -32,7 +32,24 @@ function main() {
   if (cmd === 'unwire') process.exit(run('wire.cjs', ['unwire', ...rest]));
   if (cmd === 'doctor') process.exit(run('wire.cjs', ['doctor', ...rest]));
 
-  console.error('usage: cc-burnmeter <serve|proxy|statusline|wire|unwire|doctor|selftest> [...args]');
+  // `url` prints the dashboard address with its bearer token (the page 401s on
+  // every fetch without it); `open` also launches the browser. Used by the skill.
+  if (cmd === 'url' || cmd === 'open') {
+    const fs = require('fs');
+    const { METER_DIR } = require('./meter.cjs');
+    const port = process.env.CC_BURNMETER_PORT || rest[0] || '4777';
+    let token = '';
+    try { token = fs.readFileSync(path.join(METER_DIR, 'token'), 'utf8').trim(); } catch (e) { /* not started yet */ }
+    const url = `http://127.0.0.1:${port}/${token ? '?token=' + token : ''}`;
+    console.log(url + (token ? '' : '   (no token yet: start the dashboard once with `cc-burnmeter serve`)'));
+    if (cmd === 'open' && token) {
+      const opener = process.platform === 'darwin' ? 'open' : process.platform === 'win32' ? 'start' : 'xdg-open';
+      spawnSync(opener, [url], { stdio: 'ignore', shell: process.platform === 'win32' });
+    }
+    process.exit(0);
+  }
+
+  console.error('usage: cc-burnmeter <serve|proxy|statusline|wire|unwire|doctor|url|open|selftest> [...args]');
   process.exit(1);
 }
 
