@@ -7,7 +7,7 @@
       "name": "cc-burnmeter",
       "source": "./",
       "description": "Real-time token meter for Claude Code: every API call, who caused it, what was re-sent, what was injected, what came back. Nothing leaves the machine.",
-      "version": "0.2.0",
+      "version": "0.2.1",
       "author": { "name": "Timothy Joshua", "url": "https://github.com/NoobProTim" },
       "homepage": "https://github.com/NoobProTim/cc-burnmeter",
       "license": "MIT"

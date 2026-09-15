@@ -120,6 +120,7 @@ function classifySource(text, record) {
     if (/^\[Image/.test(t)) return { kind: 'image', label: 'image' };
     const m = /Base directory for this skill: .*?[\\/]skills[\\/]([^\s\\/]+)/.exec(t) || /<command-name>\/?([^<]+)<\/command-name>/.exec(t);
     if (m) return { kind: 'skill', label: m[1].trim() };
+    if (/<observed_from_primary_session>/.test(t)) return { kind: 'meta', label: 'claude-mem' };
     return { kind: 'meta', label: null };
   }
   if (/^<task-notification>/.test(t)) {
@@ -322,7 +323,10 @@ function processLine(line, ctx, emit) {
       for (const n of toolNames) {
         if (!ctx.lastCall.tools.includes(n)) ctx.lastCall.tools.push(n);
       }
+      if (toolNames.length) ctx.idle = false;
     } else {
+      // A reply with no tool_use ends the model's side of the turn.
+      ctx.idle = !toolNames.length;
       const call = buildCall(record, toolNames, ctx);
       if (ctx.currentTurn) ctx.currentTurn.calls.push(call);
       ctx.lastCall = call;
@@ -346,7 +350,10 @@ function processLine(line, ctx, emit) {
       // block. It still costs tokens on the next call, so attribute it there.
       const src = classifySource(extractText(content), record);
       ctx.pendingInjected.push({ type: src.kind, name: src.label, bytes: byteLen(content) });
-      return;
+      // ...unless it arrives after the last reply finished (or before any turn): then it
+      // IS the next input. claude-mem's observer runs on nothing else, and left inside the
+      // previous turn every observer call inherited that turn's source ("compact").
+      if (src.kind !== 'meta' || (ctx.currentTurn && !ctx.idle)) return;
     }
     // Founder ruling: a session whose last record is a user prompt or a
     // tool_result with no assistant usage after it has a call IN FLIGHT.
@@ -361,7 +368,8 @@ function processLine(line, ctx, emit) {
       return;
     }
     // Turn start.
-    if (ctx.currentTurn) finishTurn(ctx, emit);
+    if (ctx.currentTurn && !isEmptyMeta(ctx.currentTurn)) finishTurn(ctx, emit);
+    ctx.idle = false;
     const text = extractText(content);
     const src = classifySource(text, record);
     ctx.currentTurn = {
@@ -418,6 +426,9 @@ function processLine(line, ctx, emit) {
   }
 }
 
+// An injected message no call answered (a local-command caveat before /compact) is not a turn.
+const isEmptyMeta = (t) => t.source === 'meta' && !t.calls.length;
+
 function finishTurn(ctx, emit) {
   const t = ctx.currentTurn;
   t.sums = sumCalls(t.calls);
@@ -429,7 +440,7 @@ function finishTurn(ctx, emit) {
 
 function finalizeCtx(ctx, emit) {
   if (ctx.currentTurn) {
-    finishTurn(ctx, emit);
+    if (!isEmptyMeta(ctx.currentTurn)) finishTurn(ctx, emit);
     ctx.currentTurn = null;
   }
 }
@@ -1641,6 +1652,35 @@ async function runSelftest() {
     assert(skill.kind === 'skill' && skill.label === 'compact-prep', `skill body -> skill/compact-prep, got ${JSON.stringify(skill)}`);
     assert(c('[Image: original 390x2400]', { isMeta: true }).kind === 'image', 'image attachment');
     assert(c('anything else', { isMeta: true }).kind === 'meta', 'other isMeta is meta');
+    assert(c('[MESSAGE FROM NON-USER SOURCE - NOT USER INPUT]\n<observed_from_primary_session>', { isMeta: true }).label === 'claude-mem', 'claude-mem observer label');
+  });
+
+  // 18b. claude-mem's observer runs on injected (isMeta) messages only. One that arrives
+  //      after a text-only reply is a new turn; before this, every observer call
+  //      inherited the source of its last self-compaction and showed as "compact".
+  test('injected messages after a finished reply start their own turn', () => {
+    const ctx = makeCtx({ project: 'p', sessionId: 's-obs', agentId: null, agentLabel: null });
+    const out = { turns: [], calls: [] };
+    const emit = (k, p) => { if (k === 'turn') out.turns.push(p); if (k === 'call') out.calls.push(p); };
+    const usage = { input_tokens: 1, cache_creation_input_tokens: 10, cache_read_input_tokens: 0, output_tokens: 1, speed: 'standard' };
+    let n = 0;
+    const obs = () => processLine(JSON.stringify({ type: 'user', isMeta: true, uuid: 'o' + n, timestamp: 't', message: { role: 'user', content: '[MESSAGE FROM NON-USER SOURCE - NOT USER INPUT]\n<observed_from_primary_session>' } }), ctx, emit);
+    const reply = (tool) => { n++; processLine(JSON.stringify({ type: 'assistant', requestId: 'r' + n, timestamp: 't', message: { id: 'm' + n, model: 'claude-haiku-4-5', usage, content: tool ? [{ type: 'tool_use', id: 'tu' + n, name: 'Bash' }] : [{ type: 'text', text: 'ok' }] } }), ctx, emit); };
+    const user = (content) => processLine(JSON.stringify({ type: 'user', uuid: 'u' + n, timestamp: 't', message: { role: 'user', content } }), ctx, emit);
+    obs(); reply(); // an observer transcript opens on an injected message
+    user('This session is being continued from a previous conversation.'); reply();
+    obs(); reply(); // the call the dashboard labelled "compact"
+    const src = out.calls.map((c) => c.turnSource + '/' + c.turnLabel).join(' ');
+    assert(src === 'meta/claude-mem compaction/summary meta/claude-mem', `observer calls, got ${src}`);
+    // Interactive shapes must not split: an injected block before a prompt's first call,
+    // or between tool round-trips, stays inside the founder's turn.
+    user('please fix it'); obs(); reply(true);
+    user([{ type: 'tool_result', tool_use_id: 'tu' + n, content: 'x' }]); obs(); reply();
+    const fnd = out.calls.slice(3).map((c) => c.turnSource).join(' ');
+    assert(fnd === 'founder founder', `founder turn must not split, got ${fnd}`);
+    // An injected message no call answered (a local-command caveat) is not reported as a turn.
+    obs(); user('<command-name>/compact</command-name>');
+    assert(!out.turns.some((t) => t.source === 'meta' && !t.calls.length), 'an empty meta turn must not be emitted');
   });
 
   // 18. A turn carries its source + label, the call carries the turn's source,

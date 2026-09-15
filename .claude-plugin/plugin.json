@@ -2,7 +2,7 @@
   "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
   "name": "cc-burnmeter",
   "displayName": "CC-Burnmeter",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Real-time token meter for Claude Code: every API call, who caused it, what was re-sent, what was injected, what came back. Reads your local transcripts; nothing leaves the machine.",
   "author": { "name": "Timothy Joshua", "url": "https://github.com/NoobProTim" },
   "repository": "https://github.com/NoobProTim/cc-burnmeter",

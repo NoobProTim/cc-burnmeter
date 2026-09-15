@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.1 — 2026-09-14
+
+- Fix: an injected (`isMeta`) message that arrives after the model's last reply finished now starts
+  its own turn. claude-mem's observer session runs on nothing else, so every observer call used to
+  inherit the source of its last self-compaction and showed in the Live table as `COMPACT · summary`.
+  Observer calls now show as `META · claude-mem`. Injected blocks inside a running turn (skill bodies,
+  images, mid-tool-loop reminders) still attach to that turn; an injected message no call answered is
+  not reported as a turn.
+
 ## 0.2.0 — 2026-09-14
 
 - Plugin pre-mortem fixes: SessionStart hook rewritten in Node (no `sh`/`curl`, same on Windows);
